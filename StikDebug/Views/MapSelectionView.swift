@@ -984,6 +984,10 @@ struct LocationSimulationView: View {
     }
 
     var body: some View {
+        changeHandlers(mapContent)
+    }
+
+    private var mapContent: some View {
         ZStack(alignment: .bottom) {
             WayfarerMapView(
                 source: mapSource,
@@ -1276,6 +1280,12 @@ struct LocationSimulationView: View {
                 DispatchQueue.main.async { buildMultiStopRoute() }
             }
         }
+    }
+
+    /// Reactions to state changes, kept apart from the view tree so the compiler can
+    /// type-check each part quickly.
+    private func changeHandlers<Content: View>(_ content: Content) -> some View {
+        content
         .onChange(of: speedKmh) { _, _ in
             applySpeedChange()
         }
