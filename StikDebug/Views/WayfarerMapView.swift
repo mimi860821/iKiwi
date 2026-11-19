@@ -170,6 +170,7 @@ struct WayfarerMapView: UIViewRepresentable {
     var stopLine: [CLLocationCoordinate2D]
     var markers: [WayfarerMapMarker]
     var onTap: (CLLocationCoordinate2D) -> Void
+    var onLongPressMarker: (String) -> Void
     var onCameraChange: (WayfarerCamera) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -188,6 +189,11 @@ struct WayfarerMapView: UIViewRepresentable {
         doubleTap.numberOfTapsRequired = 2
         doubleTap.delegate = context.coordinator
         map.addGestureRecognizer(doubleTap)
+
+        let longPress = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleLongPress(_:)))
+        longPress.minimumPressDuration = 0.5
+        longPress.delegate = context.coordinator
+        map.addGestureRecognizer(longPress)
 
         let singleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
         singleTap.delegate = context.coordinator
@@ -370,6 +376,20 @@ struct WayfarerMapView: UIViewRepresentable {
             parent.onTap(map.convert(point, toCoordinateFrom: map))
         }
 
+        @objc func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
+            guard recognizer.state == .began, let map = recognizer.view as? MKMapView else { return }
+            var view = map.hitTest(recognizer.location(in: map), with: nil)
+            while let current = view {
+                if let annotationView = current as? MKAnnotationView,
+                   let item = annotationView.annotation as? WayfarerAnnotation {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    parent.onLongPressMarker(item.marker.id)
+                    return
+                }
+                view = current.superview
+            }
+        }
+
         func gestureRecognizer(
             _ gestureRecognizer: UIGestureRecognizer,
             shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
@@ -378,6 +398,8 @@ struct WayfarerMapView: UIViewRepresentable {
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            // Taps ignore markers; a long press is how a marker is picked.
+            if gestureRecognizer is UILongPressGestureRecognizer { return true }
             var view = touch.view
             while let current = view {
                 if current is MKAnnotationView { return false }

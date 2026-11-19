@@ -826,6 +826,12 @@ struct LocationSimulationView: View {
     @State private var showHistory = false
     @State private var showSharedList = false
     @State private var panelCollapsed = false
+    /// Index of the stop whose long-press menu is open.
+    @State private var stopActionTarget: Int?
+    /// The full stop list when a route was started from a middle stop, so Reset can
+    /// bring every stop back.
+    @State private var routeStopBackup: [CLLocationCoordinate2D]?
+    @State private var autoStartAfterBuild = false
     @State private var copyToastText: String?
     @State private var playbackBaseOffset = 0
     @State private var routeWaypointIndices: [Int] = []
@@ -1001,6 +1007,9 @@ struct LocationSimulationView: View {
                     } else {
                         applySelection(tapped)
                     }
+                },
+                onLongPressMarker: { id in
+                    handleMarkerLongPress(id)
                 },
                 onCameraChange: { camera in
                     mapHeading = camera.heading
@@ -1286,6 +1295,29 @@ struct LocationSimulationView: View {
     /// type-check each part quickly.
     private func changeHandlers<Content: View>(_ content: Content) -> some View {
         content
+        .confirmationDialog(
+            stopActionTitle,
+            isPresented: Binding(
+                get: { stopActionTarget != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        stopActionTarget = nil
+                    }
+                }
+            ),
+            titleVisibility: .visible,
+            presenting: stopActionTarget
+        ) { index in
+            Button("飛到這一站再開始") {
+                flyToStopAndStart(index)
+            }
+            Button("移除這一站", role: .destructive) {
+                removeStop(at: index)
+            }
+            Button("取消", role: .cancel) { }
+        } message: { index in
+            Text("共 \(multiStops.count) 站。「飛到這一站再開始」會先瞬移到第 \(index + 1) 站，再從這裡照目前的設定走。")
+        }
         .onChange(of: speedKmh) { _, _ in
             applySpeedChange()
         }
@@ -1825,7 +1857,7 @@ struct LocationSimulationView: View {
             resetRouteSelection()
             return
         }
-        let stops = routeSourceStops
+        let stops = routeStopBackup ?? routeSourceStops
         resetRouteSelection()
         multiStops = stops.map { RouteStop(coordinate: $0) }
         panelTab = .multi
@@ -1849,6 +1881,8 @@ struct LocationSimulationView: View {
         isPrefetchingRouteSpeeds = false
         multiStops = []
         routeSourceStops = []
+        routeStopBackup = nil
+        autoStartAfterBuild = false
         routeIsHop = false
         routeFromMultiStop = false
         routeCycleDirty = false
@@ -2127,7 +2161,7 @@ extension LocationSimulationView {
         VStack(spacing: 8) {
             Text(multiStops.isEmpty
                  ? "點選地圖加入站點，或貼上座標清單"
-                 : "已加入 \(multiStops.count) 個站點，可繼續點地圖加入")
+                 : "已加入 \(multiStops.count) 個站點，可繼續點地圖加入；長按站點可移除，或從該站開始")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
@@ -2356,13 +2390,20 @@ extension LocationSimulationView {
         }
     }
 
-    private func buildHopRoute() {
+    private func buildHopRoute(startingAt startIndex: Int = 0, autoStart: Bool = false) {
         guard multiStops.count >= 2 else { return }
+        let allStops = multiStops.map(\.coordinate)
+        let shape = pathShape
+        let stops = Self.arrangedStops(allStops, startingAt: startIndex, shape: shape)
+        guard stops.count >= 2 else {
+            alertTitle = "沒有後續的站點"
+            alertMessage = "這是最後一站，後面沒有可走的站點。請選前面的站點，或把走法改成「繞圈」。"
+            showAlert = true
+            return
+        }
         routeLoadTask?.cancel()
         routeSpeedPrefetchTask?.cancel()
-
-        let stops = multiStops.map(\.coordinate)
-        let shape = pathShape
+        routeStopBackup = startIndex > 0 ? allStops : nil
         var path = stops
         switch shape {
         case .oneWay:
@@ -2409,6 +2450,9 @@ extension LocationSimulationView {
         isPrefetchingRouteSpeeds = false
         if let routePolyline {
             position = .rect(routePolyline.boundingMapRect)
+        }
+        if autoStart {
+            DispatchQueue.main.async { simulateRoute() }
         }
     }
 
@@ -2953,10 +2997,62 @@ extension LocationSimulationView {
         multiStops.append(RouteStop(coordinate: stopCoordinate))
     }
 
-    private func buildMultiStopRoute() {
+    /// The stops in the order a run starting at `startIndex` visits them: stops before
+    /// it are skipped, except a circuit, which goes around from there.
+    private static func arrangedStops(
+        _ all: [CLLocationCoordinate2D],
+        startingAt startIndex: Int,
+        shape: RouteShape
+    ) -> [CLLocationCoordinate2D] {
+        guard startIndex > 0, startIndex < all.count else { return all }
+        let tail = Array(all[startIndex...])
+        if shape == .circuit {
+            return tail + Array(all[..<startIndex])
+        }
+        return tail
+    }
+
+    private var stopActionTitle: String {
+        guard let index = stopActionTarget else { return "站點" }
+        return "第 \(index + 1) 站"
+    }
+
+    private func handleMarkerLongPress(_ id: String) {
+        guard isMultiStopMode, id.hasPrefix("stop-") else { return }
+        let raw = String(id.dropFirst("stop-".count))
+        if let index = multiStops.firstIndex(where: { $0.id.uuidString == raw }) {
+            stopActionTarget = index
+        }
+    }
+
+    private func removeStop(at index: Int) {
+        guard multiStops.indices.contains(index) else { return }
+        multiStops.remove(at: index)
+    }
+
+    private func flyToStopAndStart(_ index: Int) {
+        guard multiStops.indices.contains(index) else { return }
+        guard pairingExists else {
+            alertTitle = "還不能開始"
+            alertMessage = "尚未匯入配對檔，請先完成設定。"
+            showAlert = true
+            return
+        }
+        buildMultiStopRoute(startingAt: index, autoStart: true)
+    }
+
+    private func buildMultiStopRoute(startingAt startIndex: Int = 0, autoStart: Bool = false) {
         guard multiStops.count >= 2 else { return }
         if hopMode {
-            buildHopRoute()
+            buildHopRoute(startingAt: startIndex, autoStart: autoStart)
+            return
+        }
+        let allStops = multiStops.map(\.coordinate)
+        let arranged = Self.arrangedStops(allStops, startingAt: startIndex, shape: pathShape)
+        guard arranged.count >= 2 else {
+            alertTitle = "沒有後續的站點"
+            alertMessage = "這是最後一站，後面沒有可走的站點。請選前面的站點，或把走法改成「繞圈」。"
+            showAlert = true
             return
         }
         if followRoads && multiStops.count > 25 {
@@ -2977,7 +3073,7 @@ extension LocationSimulationView {
         isPrefetchingRouteSpeeds = false
         coordinate = nil
 
-        let stopCoordinates = multiStops.map(\.coordinate)
+        let stopCoordinates = arranged
         let shape = pathShape
         let shouldRepeat = repeatRoute && shape != .oneWay
         let mode = travelMode
@@ -2985,6 +3081,8 @@ extension LocationSimulationView {
         let speedMps = WayfarerSpeed.metersPerSecond(fromKmh: speedKmh)
 
         routeSourceStops = stopCoordinates
+        routeStopBackup = startIndex > 0 ? allStops : nil
+        autoStartAfterBuild = autoStart
         routeSourceFollowRoads = roads
         routeSourceShape = shape
         routeIsHop = false
@@ -3040,6 +3138,10 @@ extension LocationSimulationView {
                     if let routePolyline {
                         position = .rect(routePolyline.boundingMapRect)
                     }
+                    if autoStartAfterBuild {
+                        autoStartAfterBuild = false
+                        DispatchQueue.main.async { simulateRoute() }
+                    }
                     if built.straightLegCount > 0 {
                         alertTitle = "部分路段改用直線"
                         alertMessage = "有 \(built.straightLegCount) 段找不到道路路線，已改用直線連接。"
@@ -3050,11 +3152,13 @@ extension LocationSimulationView {
                 await MainActor.run {
                     guard routeRequestID == requestID else { return }
                     isLoadingRoute = false
+                    autoStartAfterBuild = false
                 }
             } catch {
                 await MainActor.run {
                     guard routeRequestID == requestID else { return }
                     isLoadingRoute = false
+                    autoStartAfterBuild = false
                     alertTitle = "路線規劃失敗"
                     alertMessage = error.localizedDescription
                     showAlert = true
