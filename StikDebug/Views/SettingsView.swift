@@ -41,6 +41,9 @@ struct SettingsView: View {
     @State private var ddiStatusMessage: String = ""
     @State private var ddiResultMessage: (text: String, isError: Bool)?
     @ObservedObject private var updater = UpdateChecker.shared
+    @AppStorage(AutoRestoreSettings.enabledKey) private var autoRestoreEnabled = true
+    @AppStorage(AutoRestoreSettings.teleportMinutesKey) private var autoRestoreTeleportMinutes = AutoRestoreSettings.defaultTeleportMinutes
+    @AppStorage(AutoRestoreSettings.routeMinutesKey) private var autoRestoreRouteMinutes = AutoRestoreSettings.defaultRouteMinutes
     @State private var updateMessage: String?
 
     private var appVersion: String {
@@ -130,6 +133,27 @@ struct SettingsView: View {
 
                 } header: {
                     Text("背景保持運作")
+                }
+
+                Section {
+                    Toggle("自動恢復真實位置", isOn: $autoRestoreEnabled)
+                        .onChange(of: autoRestoreEnabled) { _, enabled in
+                            if !enabled {
+                                LocationSimulationSession.shared.cancelAutoRestore()
+                            }
+                        }
+                    if autoRestoreEnabled {
+                        Stepper(value: $autoRestoreTeleportMinutes, in: 5...720, step: 5) {
+                            Text("瞬移後：\(Self.durationText(autoRestoreTeleportMinutes))")
+                        }
+                        Stepper(value: $autoRestoreRouteMinutes, in: 5...1440, step: 5) {
+                            Text("路線開始後：\(Self.durationText(autoRestoreRouteMinutes))")
+                        }
+                    }
+                } header: {
+                    Text("安全")
+                } footer: {
+                    Text("手機萬一遺失時，不會一直顯示假的位置。時間從瞬移、或路線開始的那一刻算起，到了會自動停止模擬，回到手機的真實位置。需要 app 仍在背景運作才會執行。")
                 }
 
                 Section("Behavior") {
@@ -344,6 +368,17 @@ struct SettingsView: View {
             txmLabel = processInfo.hasTXM ? "TXM" : "Non TXM"
         }
         return "Version \(appVersion) • iOS \(UIDevice.current.systemVersion) • \(txmLabel)"
+    }
+
+    private static func durationText(_ minutes: Double) -> String {
+        let total = Int(minutes)
+        if total % 60 == 0 {
+            return "\(total / 60) 小時"
+        }
+        if total > 60 {
+            return "\(total / 60) 小時 \(total % 60) 分鐘"
+        }
+        return "\(total) 分鐘"
     }
 
     private func handleAudioKeepAliveChange(_ enabled: Bool) {

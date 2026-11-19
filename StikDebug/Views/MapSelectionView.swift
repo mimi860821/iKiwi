@@ -1295,6 +1295,14 @@ struct LocationSimulationView: View {
     /// type-check each part quickly.
     private func changeHandlers<Content: View>(_ content: Content) -> some View {
         content
+        .onChange(of: simulationSession.isActive) { _, active in
+            // The simulation can end without the Stop button (automatic restore).
+            guard !active, simulatedCoordinate != nil || routePlaybackTask != nil else { return }
+            cancelRoutePlayback(resetMarker: true)
+            simulatedCoordinate = nil
+            endBackgroundTask()
+            position = .user
+        }
         .confirmationDialog(
             stopActionTitle,
             isPresented: Binding(
@@ -1729,6 +1737,7 @@ struct LocationSimulationView: View {
             beginBackgroundTask()
             LocationSimulationSession.shared.clearRoute()
             startResendLoop(with: coord)
+            LocationSimulationSession.shared.armAutoRestore(forRoute: false)
         }
     }
 
@@ -1756,6 +1765,7 @@ struct LocationSimulationView: View {
             )
             simulatedCoordinate = nil
             routePlaybackCoordinate = firstCoordinate
+            LocationSimulationSession.shared.armAutoRestore(forRoute: true)
             startRoutePlayback(routeID: routeID)
         }
     }
@@ -2254,6 +2264,14 @@ extension LocationSimulationView {
                     mapSourceMenu
                     if hasActiveSimulation {
                         realLocationButton
+                        if let restoreAt = simulationSession.autoRestoreAt {
+                            Text("\(TimeZoneFormat.clockString(.current, at: restoreAt)) 自動恢復")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(.regularMaterial, in: Capsule())
+                        }
                     }
                 }
             }
