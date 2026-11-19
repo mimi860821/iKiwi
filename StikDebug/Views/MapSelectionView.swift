@@ -1033,10 +1033,14 @@ struct LocationSimulationView: View {
                 }
 
                 VStack(spacing: 12) {
-                    if isRouteRunning && panelCollapsed {
-                        collapsedBar
-                    } else {
+                    if canCollapsePanel && panelCollapsed {
                         if isRouteRunning {
+                            collapsedBar
+                        } else {
+                            collapsedEditBar
+                        }
+                    } else {
+                        if canCollapsePanel {
                             panelHandle
                         }
 
@@ -1286,6 +1290,11 @@ struct LocationSimulationView: View {
                 panelCollapsed = false
                 playbackElapsedBase = 0
                 playbackRunningSince = nil
+            }
+        }
+        .onChange(of: canCollapsePanel) { _, canCollapse in
+            if !canCollapse {
+                panelCollapsed = false
             }
         }
         .onChange(of: isPlaybackPaused) { _, paused in
@@ -2409,8 +2418,14 @@ extension LocationSimulationView {
     }
 
     /// Swipe down shrinks the panel to one row while a route runs; swipe up brings it back.
+    /// The panel can shrink to one row while a route plays and while stops are being
+    /// picked on the map for a multi-stop route.
+    private var canCollapsePanel: Bool {
+        isRouteRunning || isMultiStopMode
+    }
+
     private func handlePanelDrag(_ translation: CGSize) {
-        guard isRouteRunning else { return }
+        guard canCollapsePanel else { return }
         guard abs(translation.height) > abs(translation.width) * 1.5 else { return }
         if translation.height > 40 {
             withAnimation(.easeInOut(duration: 0.25)) { panelCollapsed = true }
@@ -2450,6 +2465,43 @@ extension LocationSimulationView {
             Text(progress)
             Text("·")
             PlaybackElapsedText(base: playbackElapsedBase, since: playbackRunningSince)
+        }
+    }
+
+    /// One-row panel while picking stops: expand, stop count, undo, build.
+    private var collapsedEditBar: some View {
+        HStack(spacing: 10) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.25)) { panelCollapsed = false }
+            } label: {
+                Image(systemName: "chevron.up")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("展開設定面板")
+
+            Text(multiStops.isEmpty ? "點地圖加入站點" : "已加入 \(multiStops.count) 個站點")
+                .font(.footnote)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+
+            Button {
+                if !multiStops.isEmpty { multiStops.removeLast() }
+            } label: {
+                Image(systemName: "arrow.uturn.backward")
+                    .frame(width: 22)
+            }
+            .buttonStyle(.bordered)
+            .disabled(multiStops.isEmpty)
+            .accessibilityLabel("復原")
+
+            Button("建立路線") {
+                buildMultiStopRoute()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(multiStops.count < 2 || isLoadingRoute)
         }
     }
 
