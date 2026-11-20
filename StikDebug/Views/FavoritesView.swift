@@ -86,6 +86,37 @@ struct BookmarkImportSummary {
     var added = 0
     var skipped = 0
     var categoriesAdded = 0
+    var routesAdded = 0
+}
+
+// MARK: - Favorites export (iKiwi format)
+
+/// What "export" writes: coordinates with their categories, and routes.
+private struct FavoritesExportFile: Codable {
+    var format = "ikiwi-favorites"
+    var version = 1
+    var exportedAt = Date()
+    var categories: [FavoriteCategory]
+    var coordinates: [CoordinateFavorite]
+    var routes: [RouteFavorite]
+}
+
+struct FavoritesExportDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+
+    var data: Data
+
+    init(data: Data = Data()) {
+        self.data = data
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
 }
 
 // MARK: - Store
@@ -182,6 +213,90 @@ final class FavoritesStore: ObservableObject {
 
     /// Imports a bookmarks file exported by LocWarp (categories plus bookmarks).
     /// Already present favorites (same name and coordinate) are skipped.
+    /// JSON for the whole favorites list, ready to be saved as a file.
+    func exportData() throws -> Data {
+        let file = FavoritesExportFile(
+            categories: data.categories,
+            coordinates: data.coordinates,
+            routes: data.routes
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(file)
+    }
+
+    /// Imports a file made by "export" or a LocWarp bookmarks file.
+    func importFavorites(_ raw: Data) throws -> BookmarkImportSummary {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        if let file = try? decoder.decode(FavoritesExportFile.self, from: raw),
+           file.format == "ikiwi-favorites" {
+            return importExported(file)
+        }
+        return try importLocWarpBookmarks(raw)
+    }
+
+    private func importExported(_ file: FavoritesExportFile) -> BookmarkImportSummary {
+        var summary = BookmarkImportSummary()
+
+        var categoryMap: [UUID: UUID] = [:]
+        for category in file.categories {
+            let before = data.categories.count
+            if let id = addCategory(category.name) {
+                categoryMap[category.id] = id
+                if data.categories.count > before {
+                    summary.categoriesAdded += 1
+                }
+            }
+        }
+
+        for item in file.coordinates {
+            guard abs(item.latitude) <= 90, abs(item.longitude) <= 180 else {
+                summary.skipped += 1
+                continue
+            }
+            let exists = data.coordinates.contains {
+                abs($0.latitude - item.latitude) < 0.000_001
+                    && abs($0.longitude - item.longitude) < 0.000_001
+                    && $0.name == item.name
+            }
+            if exists {
+                summary.skipped += 1
+                continue
+            }
+            var favorite = item
+            favorite.id = UUID()
+            favorite.categoryID = item.categoryID.flatMap { categoryMap[$0] }
+            data.coordinates.append(favorite)
+            summary.added += 1
+        }
+
+        for route in file.routes {
+            guard let first = route.stops.first else {
+                summary.skipped += 1
+                continue
+            }
+            let exists = data.routes.contains {
+                $0.name == route.name
+                    && $0.stops.count == route.stops.count
+                    && abs(($0.stops.first?.latitude ?? 0) - first.latitude) < 0.000_001
+                    && abs(($0.stops.first?.longitude ?? 0) - first.longitude) < 0.000_001
+            }
+            if exists {
+                summary.skipped += 1
+                continue
+            }
+            var copy = route
+            copy.id = UUID()
+            data.routes.append(copy)
+            summary.routesAdded += 1
+        }
+
+        save()
+        return summary
+    }
+
     func importLocWarpBookmarks(_ raw: Data) throws -> BookmarkImportSummary {
         let file = try JSONDecoder().decode(LocWarpFile.self, from: raw)
         var summary = BookmarkImportSummary()
@@ -424,6 +539,8 @@ struct FavoritesSheet: View {
     @State private var showCategoryManager = false
     @State private var showRename = false
     @State private var showImporter = false
+    @State private var showExporter = false
+    @State private var exportDocument = FavoritesExportDocument()
     @State private var selecting = false
     @State private var selectedIDs: Set<UUID> = []
     @State private var importMessage: String?
@@ -474,6 +591,19 @@ struct FavoritesSheet: View {
                     routesContent
                 }
             }
+            .fileExporter(
+                isPresented: $showExporter,
+                document: exportDocument,
+                contentType: .json,
+                defaultFilename: Self.exportFileName()
+            ) { result in
+                switch result {
+                case .success:
+                    importMessage = "已匯出 \(store.data.coordinates.count) 筆座標、\(store.data.routes.count) 條路線。\n檔案裡有你收藏的座標，分享給別人前請先確認。"
+                case .failure:
+                    importMessage = "匯出失敗。"
+                }
+            }
             .safeAreaInset(edge: .bottom) {
                 if selecting && section == 0 {
                     selectionBar
@@ -492,12 +622,22 @@ struct FavoritesSheet: View {
                     }
                     .disabled(section != 0)
 
-                    Button {
-                        showImporter = true
+                    Menu {
+                        Button {
+                            showImporter = true
+                        } label: {
+                            Label("匯入收藏檔…", systemImage: "square.and.arrow.down")
+                        }
+                        Button {
+                            prepareExport()
+                        } label: {
+                            Label("匯出收藏…", systemImage: "square.and.arrow.up")
+                        }
+                        .disabled(store.data.coordinates.isEmpty && store.data.routes.isEmpty)
                     } label: {
-                        Image(systemName: "square.and.arrow.down")
+                        Image(systemName: "arrow.up.arrow.down.square")
                     }
-                    .accessibilityLabel("匯入收藏檔")
+                    .accessibilityLabel("匯入或匯出收藏")
 
                     Menu {
                         Picker("排序", selection: $sortRaw) {
@@ -539,7 +679,7 @@ struct FavoritesSheet: View {
                 importBookmarkFile(result)
             }
             .alert(
-                "匯入收藏",
+                "收藏匯入／匯出",
                 isPresented: Binding(
                     get: { importMessage != nil },
                     set: { if !$0 { importMessage = nil } }
@@ -551,6 +691,22 @@ struct FavoritesSheet: View {
             }
         }
         .presentationDetents([.large])
+    }
+
+    private static func exportFileName() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd"
+        return "iKiwi收藏-\(formatter.string(from: Date()))"
+    }
+
+    private func prepareExport() {
+        do {
+            exportDocument = FavoritesExportDocument(data: try store.exportData())
+            showExporter = true
+        } catch {
+            importMessage = "無法產生匯出檔。"
+        }
     }
 
     private func importBookmarkFile(_ result: Result<[URL], Error>) {
@@ -565,10 +721,12 @@ struct FavoritesSheet: View {
             }
             do {
                 let data = try Data(contentsOf: url)
-                let summary = try store.importLocWarpBookmarks(data)
-                section = 0
+                let summary = try store.importFavorites(data)
+                section = summary.added == 0 && summary.routesAdded > 0 ? 1 : 0
                 filter = .all
-                importMessage = "已匯入 \(summary.added) 筆座標、新增 \(summary.categoriesAdded) 個分類。"
+                importMessage = "已匯入 \(summary.added) 筆座標"
+                    + (summary.routesAdded > 0 ? "、\(summary.routesAdded) 條路線" : "")
+                    + "、新增 \(summary.categoriesAdded) 個分類。"
                     + (summary.skipped > 0 ? "\n略過 \(summary.skipped) 筆（已存在或座標無效）。" : "")
                     + "\n地名、國家與時區會在背景補查，需要一點時間。"
                 Task { await store.fillMissingPlaceInfo() }
