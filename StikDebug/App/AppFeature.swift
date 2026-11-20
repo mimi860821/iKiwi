@@ -15,6 +15,7 @@ enum AppFeature: String, CaseIterable, Identifiable {
     case processes
     case launchApps = "launchapps"
     case location
+    case health
     case settings
 
     var id: String {
@@ -41,6 +42,8 @@ enum AppFeature: String, CaseIterable, Identifiable {
             return "處理程序"
         case .location:
             return "定位"
+        case .health:
+            return "健康"
         case .settings:
             return "設定"
         }
@@ -66,6 +69,8 @@ enum AppFeature: String, CaseIterable, Identifiable {
             return "檢視執行中的 App"
         case .location:
             return "模擬 GPS 定位"
+        case .health:
+            return "測試寫入步數到健康"
         case .settings:
             return "設定 iKiwi"
         }
@@ -100,6 +105,8 @@ enum AppFeature: String, CaseIterable, Identifiable {
             return "rectangle.stack.person.crop"
         case .location:
             return "location"
+        case .health:
+            return "heart.text.square"
         case .settings:
             return "gearshape.fill"
         }
@@ -126,6 +133,8 @@ enum AppFeature: String, CaseIterable, Identifiable {
             ProcessInspectorView()
         case .location:
             LocationSimulationView()
+        case .health:
+            HealthTestView()
         case .settings:
             SettingsView()
         }
@@ -134,5 +143,5 @@ enum AppFeature: String, CaseIterable, Identifiable {
 
 extension AppFeature {
     static let mainTabs: [AppFeature] = [.home, .tools, .settings]
-    static let toolList: [AppFeature] = [.launchApps, .scripts, .console, .deviceInfo, .profiles, .processes, .location]
+    static let toolList: [AppFeature] = [.launchApps, .scripts, .console, .deviceInfo, .profiles, .processes, .location, .health]
 }
