@@ -361,6 +361,7 @@ struct ProfileView: View {
             return
         }
         await MainActor.run { working = true }
+        ProfileLoadGuard.mark("連線並讀取描述檔與 App 清單")
         do {
             let (profiles, apps) = try await Task.detached(priority: .userInitiated) { () throws -> ([Profile], [SideloadedApp]) in
                 let profileDatas = try JITEnableContext.shared.fetchAllProfiles()
@@ -373,6 +374,7 @@ struct ProfileView: View {
                 return (parsedProfiles, parsedApps)
             }.value
 
+            ProfileLoadGuard.mark("解析描述檔")
             let failedProfiles = profiles.filter { $0.decodeError != nil }
             let validProfiles = profiles.filter { $0.decodeError == nil }
 
@@ -409,11 +411,16 @@ struct ProfileView: View {
                     AppProfileStatus(appId: appId, profiles: profiles)
                 }
             
+            ProfileLoadGuard.mark("顯示畫面")
             await MainActor.run {
                 self.entries = computedEntries
                 self.working = false
             }
+            // Cleared only after the list has been on screen for a moment.
+            try? await Task.sleep(for: .seconds(2))
+            ProfileLoadGuard.finish()
         } catch {
+            ProfileLoadGuard.finish()
             await MainActor.run {
                 alertTitle = "Failed to load"
                 alertMsg = error.localizedDescription

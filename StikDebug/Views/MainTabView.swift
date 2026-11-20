@@ -57,6 +57,7 @@ struct MainTabView: View {
     @State private var pendingLocationAction: ExternalLocationAction?
     @ObservedObject private var sharedStore = SharedListStore.shared
     @ObservedObject private var updater = UpdateChecker.shared
+    @ObservedObject private var signatureChecker = SignatureExpiryChecker.shared
 
     var body: some View {
         ZStack {
@@ -86,10 +87,12 @@ struct MainTabView: View {
             .task {
                 updater.checkAtLaunch()
             }
+            .signatureExpiryPrompt()
             .alert(
                 "有新版本",
                 isPresented: Binding(
-                    get: { updater.available != nil },
+                    // Waits until the signature reminder, if any, has been answered.
+                    get: { updater.available != nil && signatureChecker.prompt == nil },
                     set: { isPresented in
                         if !isPresented {
                             updater.available = nil

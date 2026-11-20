@@ -28,10 +28,6 @@
 		<string>_stikdebug._tcp</string>
 		<string>_stikdebug._udp</string>
 	</array>
-	<key>NSHealthShareUsageDescription</key>
-	<string>iKiwi 不會讀取你的健康資料。</string>
-	<key>NSHealthUpdateUsageDescription</key>
-	<string>iKiwi 會把你選擇的步數與距離寫入「健康」，並可隨時一鍵刪除。</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

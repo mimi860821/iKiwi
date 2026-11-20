@@ -54,18 +54,6 @@ jobs:
           cp -R build/iKiwi.xcarchive/Products/Applications/*.app Payload/
           zip -r iKiwi.ipa Payload
 
-      - name: Build HealthKit test variant
-        run: |
-          # Same app with the HealthKit entitlement embedded, for trying Health access
-          # through SideStore. The normal IPA above is left untouched.
-          brew install ldid
-          rm -rf health-variant
-          mkdir health-variant
-          cp -R Payload health-variant/Payload
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 0.1.${{ github.run_number }}-health" health-variant/Payload/iKiwi.app/Info.plist
-          ldid -Sci/HealthKit.entitlements health-variant/Payload/iKiwi.app/iKiwi
-          (cd health-variant && zip -r ../iKiwi-health.ipa Payload)
-
       - name: Generate SideStore source
         env:
           RUN_NUMBER: ${{ github.run_number }}
@@ -132,5 +120,4 @@ jobs:
           make_latest: "true"
           files: |
             iKiwi.ipa
-            iKiwi-health.ipa
             source.json
