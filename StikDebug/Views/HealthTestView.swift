@@ -14,6 +14,7 @@ final class HealthTestModel: ObservableObject {
     @Published private(set) var log: [String] = []
     @Published private(set) var isBusy = false
     @Published private(set) var authorization = "尚未查詢"
+    @Published private(set) var diagnostics: [String] = []
 
     private let store = HKHealthStore()
     private let stepType = HKQuantityType(.stepCount)
@@ -115,6 +116,43 @@ final class HealthTestModel: ObservableObject {
         }
     }
 
+    /// What the installed copy actually carries: the version, whether the signature
+    /// contains the HealthKit entitlement, and what the provisioning profile allows.
+    func runDiagnostics() {
+        var lines: [String] = []
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        lines.append("版本：\(version)（測試版會帶 -health）")
+
+        // 1. Entitlements inside the app's code signature.
+        let needle = Data("com.apple.developer.healthkit".utf8)
+        if let url = Bundle.main.executableURL,
+           let data = try? Data(contentsOf: url, options: .mappedIfSafe) {
+            lines.append("簽章內含 HealthKit 權限：" + (data.range(of: needle) != nil ? "是" : "否"))
+        } else {
+            lines.append("簽章內含 HealthKit 權限：讀不到")
+        }
+
+        // 2. What the provisioning profile granted.
+        if let path = Bundle.main.path(forResource: "embedded", ofType: "mobileprovision"),
+           let raw = try? Data(contentsOf: URL(fileURLWithPath: path)),
+           let start = raw.range(of: Data("<?xml".utf8)),
+           let end = raw.range(of: Data("</plist>".utf8)) {
+            let plistData = raw.subdata(in: start.lowerBound..<end.upperBound)
+            if let plist = try? PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any],
+               let entitlements = plist["Entitlements"] as? [String: Any] {
+                let keys = entitlements.keys.sorted()
+                let hasHealth = keys.contains("com.apple.developer.healthkit")
+                lines.append("描述檔允許 HealthKit：" + (hasHealth ? "是" : "否"))
+                lines.append("描述檔權限：" + keys.map { $0.replacingOccurrences(of: "com.apple.developer.", with: "") }.joined(separator: "、"))
+            } else {
+                lines.append("描述檔：讀不到內容")
+            }
+        } else {
+            lines.append("描述檔：找不到（可能不是用 SideStore 簽章）")
+        }
+        diagnostics = lines
+    }
+
     func clearLog() {
         log = []
     }
@@ -142,6 +180,14 @@ struct HealthTestView: View {
                 LabeledContent("寫入權限", value: model.authorization)
             } footer: {
                 Text("這是小測試：確認 iKiwi 能不能取得「健康」的寫入權限。只會寫入 10 步的測試資料，而且可以一鍵刪除。")
+            }
+
+            Section("診斷") {
+                ForEach(Array(model.diagnostics.enumerated()), id: \.offset) { _, line in
+                    Text(line)
+                        .font(.footnote)
+                        .textSelection(.enabled)
+                }
             }
 
             Section("測試") {
@@ -176,6 +222,9 @@ struct HealthTestView: View {
         }
         .navigationTitle("健康")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { model.refreshStatus() }
+        .onAppear {
+            model.refreshStatus()
+            model.runDiagnostics()
+        }
     }
 }
