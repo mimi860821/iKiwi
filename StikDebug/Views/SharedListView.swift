@@ -33,6 +33,11 @@ struct SharedItem: Identifiable, Codable, Equatable {
     /// Bumped on every local change; `syncedVersion` is the version the server has.
     var version = 1
     var syncedVersion = 0
+    /// When the entry was added (from the server; the local time until it is known).
+    var createdAt: Date?
+    /// Looked up on this phone from the coordinates; not shared.
+    var countryCode: String?
+    var timeZoneID: String?
 
     var isPending: Bool { version != syncedVersion }
 
@@ -50,6 +55,8 @@ private struct RemoteSharedItem: Decodable {
     let note: String
     let deleted: Bool
     let updated_at: String
+    /// Added to the table later; older servers do not send it.
+    let created_at: String?
 }
 
 private struct SharedSnapshot: Codable {
@@ -72,6 +79,30 @@ enum SharedCoordinateText {
             return nil
         }
         return CLLocationCoordinate2D(latitude: numbers[0], longitude: numbers[1])
+    }
+}
+
+enum SharedDateText {
+    /// "2026-11-21T03:04:05.123456+00:00" from the server.
+    static func parseServerDate(_ text: String?) -> Date? {
+        guard let text else { return nil }
+        let withoutFraction = text.replacingOccurrences(
+            of: #"\.\d+"#,
+            with: "",
+            options: .regularExpression
+        )
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: withoutFraction)
+    }
+
+    /// "11/21 14:35" in the phone's time zone, 24-hour (with the year if not this year).
+    static func addedText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        let sameYear = Calendar.current.isDate(date, equalTo: Date(), toGranularity: .year)
+        formatter.dateFormat = sameYear ? "M/d HH:mm" : "yyyy/M/d HH:mm"
+        return formatter.string(from: date)
     }
 }
 
@@ -208,7 +239,8 @@ final class SharedListStore: ObservableObject {
             latitude: coordinate.latitude,
             longitude: coordinate.longitude,
             category: category.trimmingCharacters(in: .whitespacesAndNewlines),
-            note: note.trimmingCharacters(in: .whitespacesAndNewlines)
+            note: note.trimmingCharacters(in: .whitespacesAndNewlines),
+            createdAt: Date()
         ))
         changed()
     }
@@ -219,6 +251,10 @@ final class SharedListStore: ObservableObject {
         items[index].name = trimmed.isEmpty
             ? String(format: "%.4f, %.4f", coordinate.latitude, coordinate.longitude)
             : trimmed
+        if items[index].latitude != coordinate.latitude || items[index].longitude != coordinate.longitude {
+            items[index].countryCode = nil
+            items[index].timeZoneID = nil
+        }
         items[index].latitude = coordinate.latitude
         items[index].longitude = coordinate.longitude
         items[index].category = category.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -315,6 +351,13 @@ final class SharedListStore: ObservableObject {
             if let index = items.firstIndex(where: { $0.id == entry.id }) {
                 // Our own unsent change wins until it has been uploaded.
                 if items[index].isPending { continue }
+                if items[index].latitude != entry.lat || items[index].longitude != entry.lng {
+                    items[index].countryCode = nil
+                    items[index].timeZoneID = nil
+                }
+                if let created = SharedDateText.parseServerDate(entry.created_at) {
+                    items[index].createdAt = created
+                }
                 items[index].name = entry.name
                 items[index].latitude = entry.lat
                 items[index].longitude = entry.lng
@@ -331,13 +374,49 @@ final class SharedListStore: ObservableObject {
                     note: entry.note,
                     deleted: entry.deleted,
                     version: 0,
-                    syncedVersion: 0
+                    syncedVersion: 0,
+                    createdAt: SharedDateText.parseServerDate(entry.created_at)
                 ))
             }
         }
         if let newest = remote.last?.updated_at {
             cursor = newest
         }
+        save()
+        Task { await fillMissingPlaceInfo() }
+    }
+
+    private var isFillingPlaceInfo = false
+
+    /// Looks up country and time zone for entries that lack them (names saved or
+    /// looked up before are reused). One request at a time to respect rate limits.
+    func fillMissingPlaceInfo() async {
+        guard !isFillingPlaceInfo else { return }
+        isFillingPlaceInfo = true
+        defer { isFillingPlaceInfo = false }
+
+        let pendingIDs = items.filter { !$0.deleted && $0.timeZoneID == nil }.map { $0.id }
+        for id in pendingIDs {
+            guard let item = items.first(where: { $0.id == id }) else { continue }
+
+            if let known = PlaceCache.lookup(item.coordinate) ?? FavoritesStore.shared.knownPlace(near: item.coordinate),
+               known.timeZoneID != nil {
+                setPlaceInfo(id: id, countryCode: known.countryCode, timeZoneID: known.timeZoneID)
+                continue
+            }
+
+            // nil means the lookup itself failed (offline, throttled): try again later.
+            guard let info = await PlaceInfoResolver.resolve(item.coordinate) else { return }
+            PlaceCache.store(item.coordinate, title: info.title, timeZoneID: info.timeZoneID, countryCode: info.countryCode)
+            setPlaceInfo(id: id, countryCode: info.countryCode, timeZoneID: info.timeZoneID)
+            try? await Task.sleep(for: .milliseconds(1200))
+        }
+    }
+
+    private func setPlaceInfo(id: UUID, countryCode: String?, timeZoneID: String?) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        items[index].countryCode = countryCode
+        items[index].timeZoneID = timeZoneID
         save()
     }
 
@@ -522,6 +601,7 @@ struct SharedListSheet: View {
                 }
             }
             .task(id: store.room) {
+                await store.fillMissingPlaceInfo()
                 await store.sync(full: true)
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(20))
@@ -690,7 +770,17 @@ struct SharedListSheet: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.name)
                     .foregroundStyle(.primary)
-                Text(String(format: "%.5f, %.5f", item.latitude, item.longitude))
+                TimelineView(.everyMinute) { context in
+                    Text(TimeZoneFormat.describe(
+                        countryCode: item.countryCode,
+                        timeZoneID: item.timeZoneID,
+                        at: context.date
+                    ))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                Text(String(format: "%.5f, %.5f", item.latitude, item.longitude)
+                     + (item.createdAt.map { " · 新增 \(SharedDateText.addedText($0))" } ?? ""))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                 if !item.note.isEmpty {

@@ -11,6 +11,7 @@ create table if not exists public.ikiwi_items (
   note text not null default '',
   deleted boolean not null default false,
   updated_at timestamptz not null default now(),
+  created_at timestamptz not null default now(),
   primary key (room, id)
 );
 
@@ -65,3 +66,11 @@ revoke all on function public.ikiwi_pull(text, timestamptz) from public;
 revoke all on function public.ikiwi_push(text, jsonb) from public;
 grant execute on function public.ikiwi_pull(text, timestamptz) to anon;
 grant execute on function public.ikiwi_push(text, jsonb) to anon;
+
+-- Upgrade for a database made before "created_at" existed (run once). Entries that
+-- are already there get their last-change time as the added time.
+alter table public.ikiwi_items add column if not exists created_at timestamptz;
+update public.ikiwi_items set created_at = updated_at where created_at is null;
+alter table public.ikiwi_items alter column created_at set default now();
+alter table public.ikiwi_items alter column created_at set not null;
+notify pgrst, 'reload schema';
