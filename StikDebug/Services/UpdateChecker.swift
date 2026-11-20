@@ -47,6 +47,9 @@ final class UpdateChecker: ObservableObject {
     /// Set when a newer build is found; the main screen asks about it.
     @Published var available: AppUpdateInfo?
     @Published private(set) var isChecking = false
+    /// True once the check made when the app starts has ended (found something or not).
+    /// The signature reminder waits for it: updating refreshes the signature too.
+    @Published private(set) var launchCheckFinished = false
 
     private var didCheckAtLaunch = false
 
@@ -57,7 +60,13 @@ final class UpdateChecker: ObservableObject {
     func checkAtLaunch() {
         guard !didCheckAtLaunch else { return }
         didCheckAtLaunch = true
-        Task { _ = await check(manual: false) }
+        Task {
+            _ = await check(manual: false)
+            launchCheckFinished = true
+            // If a newer build was found, its prompt comes first and the signature
+            // reminder waits for the answer.
+            SignatureExpiryChecker.shared.checkIfNeeded()
+        }
     }
 
     /// `manual` checks ignore "skip this version" and always report back.

@@ -73,17 +73,35 @@ final class SignatureExpiryChecker: ObservableObject {
     }
 
     /// The first time iKiwi is opened on a given day: remind if fewer than 3 days
-    /// are left. The day is marked as checked whether or not a reminder was shown,
-    /// so there is at most one reminder per day.
+    /// are left. The day is marked as checked once the check has been made (or the
+    /// user chose to update), so there is at most one reminder per day.
+    ///
+    /// A new version comes first: installing it refreshes the signature too, so the
+    /// reminder only follows if that prompt was answered with "later" or "skip".
     func checkIfNeeded() {
         let today = Self.dayString(Date())
-        guard UserDefaults.standard.string(forKey: Self.lastCheckKey) != today,
-              let expiry = SignatureExpiry.expirationDate else {
-            return
-        }
+        guard UserDefaults.standard.string(forKey: Self.lastCheckKey) != today else { return }
+
+        let updater = UpdateChecker.shared
+        guard updater.launchCheckFinished, updater.available == nil else { return }
+
+        guard let expiry = SignatureExpiry.expirationDate else { return }
         UserDefaults.standard.set(today, forKey: Self.lastCheckKey)
         if expiry.timeIntervalSinceNow < Self.warningDays * 86_400 {
             prompt = SignatureExpiryInfo(expiry: expiry)
+        }
+    }
+
+    /// Updating was chosen: the signature will be renewed, so no reminder today.
+    func markCheckedToday() {
+        UserDefaults.standard.set(Self.dayString(Date()), forKey: Self.lastCheckKey)
+    }
+
+    /// Used right after the update prompt closes; a short wait lets that alert finish
+    /// going away before the next one appears.
+    func checkAfterUpdatePrompt() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.checkIfNeeded()
         }
     }
 }
