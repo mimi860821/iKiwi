@@ -453,11 +453,8 @@ struct WayfarerMapView: UIViewRepresentable {
 
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             if annotation is MKUserLocation {
-                // Follow mode still works; the blue dot itself is not drawn.
-                let hidden = MKAnnotationView(annotation: annotation, reuseIdentifier: "hidden-user")
-                hidden.isEnabled = false
-                hidden.canShowCallout = false
-                return hidden
+                // nil: the standard blue dot for the phone's own position.
+                return nil
             }
             guard let item = annotation as? WayfarerAnnotation else { return nil }
 

@@ -2339,18 +2339,16 @@ extension LocationSimulationView {
     private var topOverlay: some View {
         if searchText.isEmpty && searchCompleter.results.isEmpty {
             HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 6) {
-                    if infoCoordinate != nil {
-                        LocationInfoCard(model: locationInfo, onCopy: { copyCurrentPosition() })
-                    }
-                    if let current = currentPosition {
-                        currentPositionChip(current)
-                    }
+                if infoCoordinate != nil {
+                    LocationInfoCard(model: locationInfo, onCopy: { copyCurrentPosition() })
                 }
                 Spacer(minLength: 0)
                 VStack(alignment: .trailing, spacing: 10) {
                     WayfarerCompassButton(heading: mapHeading) {
                         resetMapNorth()
+                    }
+                    if currentPosition != nil {
+                        locateButton
                     }
                     mapSourceMenu
                     if hasActiveSimulation {
@@ -2393,29 +2391,21 @@ extension LocationSimulationView {
         displayedRouteCoordinate ?? simulationSession.coordinate ?? userLocation
     }
 
-    private func currentPositionChip(_ position: CLLocationCoordinate2D) -> some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text("目前位置")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Text(String(format: "%.5f, %.5f", position.latitude, position.longitude))
-                    .font(.caption.monospacedDigit())
+    /// Moves the map to where the phone is now (kept zoom and rotation).
+    private var locateButton: some View {
+        Button {
+            if let current = currentPosition {
+                centerMap(on: current)
             }
-            Button {
-                centerMap(on: position)
-            } label: {
-                Image(systemName: "scope")
-                    .font(.system(size: 16, weight: .semibold))
-                    .frame(width: 28, height: 28)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("把目前位置移到地圖中心")
+        } label: {
+            Image(systemName: "scope")
+                .font(.system(size: 20, weight: .semibold))
+                .frame(width: 44, height: 44)
+                .background(.regularMaterial, in: Circle())
+                .overlay(Circle().stroke(Color.secondary.opacity(0.25)))
         }
-        .padding(.leading, 10)
-        .padding(.trailing, 6)
-        .padding(.vertical, 4)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .buttonStyle(.plain)
+        .accessibilityLabel("把目前位置移到地圖中心")
     }
 
     /// Stops the simulation so the phone reports its real position again.
