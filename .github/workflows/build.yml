@@ -104,6 +104,11 @@ jobs:
           EOF
           cat source.json
 
+      - name: Show compile errors on failure
+        if: failure()
+        run: |
+          grep -n "error:" build.log | grep -v "Swift 6 language mode" | head -40 || true
+
       - name: Upload build log on failure
         if: failure()
         uses: actions/upload-artifact@v7
