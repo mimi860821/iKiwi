@@ -826,6 +826,11 @@ struct LocationSimulationView: View {
     @State private var showHistory = false
     @State private var showSharedList = false
     @State private var panelCollapsed = false
+    /// The top connection banner shrunk to one line (swipe it up).
+    @State private var statusCollapsed = false
+    /// The phone's own location as the system reports it (the simulated one while simulating).
+    @State private var userLocation: CLLocationCoordinate2D?
+    @State private var routeToShare: RouteFavorite?
     /// Index of the stop whose long-press menu is open.
     @State private var stopActionTarget: Int?
     /// The full stop list when a route was started from a middle stop, so Reset can
@@ -993,6 +998,50 @@ struct LocationSimulationView: View {
         changeHandlers(mapContent)
     }
 
+    /// The connection banner. Swipe it up to shrink it to one line, tap that line (or
+    /// swipe down) to open it again.
+    @ViewBuilder
+    private var statusBanner: some View {
+        if statusCollapsed && !isDeviceConnected {
+            HStack {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.circle")
+                        .foregroundStyle(.orange)
+                    Text(connectionErrorMessage != nil ? "連線錯誤，點一下展開" : "裝置未連線，點一下展開")
+                        .font(.caption)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.regularMaterial, in: Capsule())
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.2)) { statusCollapsed = false }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 12).onEnded { value in
+                    if value.translation.height > 20 {
+                        withAnimation(.easeInOut(duration: 0.2)) { statusCollapsed = false }
+                    }
+                }
+            )
+        } else {
+            DeviceConnectionStatusView(errorMessage: connectionErrorMessage)
+                .padding(12)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal)
+                .gesture(
+                    DragGesture(minimumDistance: 12).onEnded { value in
+                        if value.translation.height < -20, !isDeviceConnected {
+                            withAnimation(.easeInOut(duration: 0.2)) { statusCollapsed = true }
+                        }
+                    }
+                )
+        }
+    }
+
     private var mapContent: some View {
         ZStack(alignment: .bottom) {
             WayfarerMapView(
@@ -1010,6 +1059,13 @@ struct LocationSimulationView: View {
                 },
                 onLongPressMarker: { id in
                     handleMarkerLongPress(id)
+                },
+                onUserLocation: { coordinate in
+                    if let current = userLocation,
+                       WayfarerRouteBuilder.straightDistance(current, coordinate) < 3 {
+                        return
+                    }
+                    userLocation = coordinate
                 },
                 onCameraChange: { camera in
                     mapHeading = camera.heading
@@ -1112,10 +1168,7 @@ struct LocationSimulationView: View {
         }
         .safeAreaInset(edge: .top) {
             if !isDeviceConnected || showConnectedStatus {
-                DeviceConnectionStatusView(errorMessage: connectionErrorMessage)
-                    .padding(12)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                    .padding(.horizontal)
+                statusBanner
             }
         }
         .task(id: isDeviceConnected) {
@@ -1211,6 +1264,9 @@ struct LocationSimulationView: View {
                     panelTab = .teleport
                     applySelection(item.coordinate)
                     DispatchQueue.main.async { simulate() }
+                },
+                onRoute: { favorite in
+                    applyRouteFavorite(favorite)
                 }
             )
         }
@@ -1295,6 +1351,17 @@ struct LocationSimulationView: View {
     /// type-check each part quickly.
     private func changeHandlers<Content: View>(_ content: Content) -> some View {
         content
+        .onChange(of: connectionErrorMessage) { _, _ in
+            statusCollapsed = false
+        }
+        .onChange(of: isDeviceConnected) { _, connected in
+            if connected {
+                statusCollapsed = false
+            }
+        }
+        .sheet(item: $routeToShare) { route in
+            SharedRouteSaveSheet(route: route)
+        }
         .onChange(of: simulationSession.isActive) { _, active in
             // The simulation can end without the Stop button (automatic restore).
             guard !active, simulatedCoordinate != nil || routePlaybackTask != nil else { return }
@@ -1580,7 +1647,7 @@ struct LocationSimulationView: View {
                     .accessibilityLabel("複製座標")
                 }
             } else {
-                Text("點選地圖放置圖釘，或按「輸入座標」")
+                Text("點選地圖放置圖釘，或按「\(Image(systemName: "keyboard"))」")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -1685,6 +1752,17 @@ struct LocationSimulationView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(routeSourceStops.isEmpty)
+
+                Button {
+                    shareRouteTapped()
+                } label: {
+                    Image(systemName: "person.2.fill")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(.green)
+                .disabled(routePlan == nil || routeSourceStops.count < 2)
+                .accessibilityLabel("分享到共享清單")
             }
 
             if routeFromMultiStop && isRouteRunning {
@@ -2253,8 +2331,13 @@ extension LocationSimulationView {
     private var topOverlay: some View {
         if searchText.isEmpty && searchCompleter.results.isEmpty {
             HStack(alignment: .top) {
-                if infoCoordinate != nil {
-                    LocationInfoCard(model: locationInfo, onCopy: { copyCurrentPosition() })
+                VStack(alignment: .leading, spacing: 6) {
+                    if infoCoordinate != nil {
+                        LocationInfoCard(model: locationInfo, onCopy: { copyCurrentPosition() })
+                    }
+                    if let current = currentPosition {
+                        currentPositionChip(current)
+                    }
                 }
                 Spacer(minLength: 0)
                 VStack(alignment: .trailing, spacing: 10) {
@@ -2295,6 +2378,36 @@ extension LocationSimulationView {
                 .overlay(Circle().stroke(Color.secondary.opacity(0.25)))
         }
         .accessibilityLabel("切換圖資")
+    }
+
+    /// Where the phone is now: the simulated spot while simulating, else its own location.
+    private var currentPosition: CLLocationCoordinate2D? {
+        displayedRouteCoordinate ?? simulationSession.coordinate ?? userLocation
+    }
+
+    private func currentPositionChip(_ position: CLLocationCoordinate2D) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text("目前位置")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(String(format: "%.5f, %.5f", position.latitude, position.longitude))
+                    .font(.caption.monospacedDigit())
+            }
+            Button {
+                centerMap(on: position)
+            } label: {
+                Image(systemName: "scope")
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("把目前位置移到地圖中心")
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 6)
+        .padding(.vertical, 4)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     /// Stops the simulation so the phone reports its real position again.
@@ -3193,6 +3306,22 @@ extension LocationSimulationView {
             return
         }
         speedKmh = travelMode.defaultSpeedKmh
+    }
+
+    /// Opens the "share this route" sheet for the route on screen.
+    private func shareRouteTapped() {
+        guard routeSourceStops.count >= 2 else { return }
+        let count = FavoritesStore.shared.data.routes.count + 1
+        routeToShare = RouteFavorite(
+            name: "路線 \(count)",
+            stops: routeSourceStops.map { StopPoint(latitude: $0.latitude, longitude: $0.longitude) },
+            modeRaw: travelModeRaw,
+            speedKmh: speedKmh,
+            shapeRaw: routeSourceShape.rawValue,
+            followRoads: routeSourceFollowRoads,
+            hop: routeIsHop,
+            dwellSeconds: dwellSeconds
+        )
     }
 
     private func saveRouteFavorite() {

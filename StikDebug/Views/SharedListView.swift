@@ -22,6 +22,40 @@ enum SharedListConfig {
 
 // MARK: - Models
 
+/// A route kept in the shared list (the stops and how it is travelled).
+struct SharedRoutePayload: Codable, Equatable {
+    var stops: [[Double]]
+    var modeRaw: String
+    var speedKmh: Double
+    var shapeRaw: String
+    var followRoads: Bool
+    var hop: Bool?
+    var dwellSeconds: Double?
+
+    init(_ favorite: RouteFavorite) {
+        stops = favorite.stops.map { [$0.latitude, $0.longitude] }
+        modeRaw = favorite.modeRaw
+        speedKmh = favorite.speedKmh
+        shapeRaw = favorite.shapeRaw
+        followRoads = favorite.followRoads
+        hop = favorite.hop
+        dwellSeconds = favorite.dwellSeconds
+    }
+
+    func favorite(named name: String) -> RouteFavorite {
+        RouteFavorite(
+            name: name,
+            stops: stops.compactMap { $0.count == 2 ? StopPoint(latitude: $0[0], longitude: $0[1]) : nil },
+            modeRaw: modeRaw,
+            speedKmh: speedKmh,
+            shapeRaw: shapeRaw,
+            followRoads: followRoads,
+            hop: hop,
+            dwellSeconds: dwellSeconds
+        )
+    }
+}
+
 struct SharedItem: Identifiable, Codable, Equatable {
     var id = UUID()
     var name: String
@@ -44,11 +78,48 @@ struct SharedItem: Identifiable, Codable, Equatable {
     var deletedAt: Date?
     /// Asked to be deleted for good; removed from this phone once the server did it.
     var purge = false
+    /// "place" or "route"; a route keeps its stops in `route`.
+    var kind: String = "place"
+    var route: SharedRoutePayload?
 
+    var isRoute: Bool { kind == "route" && route != nil }
     var isPending: Bool { version != syncedVersion }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, latitude, longitude, category, note, deleted, version, syncedVersion
+        case createdAt, countryCode, timeZoneID, createdBy, deletedAt, purge, kind, route
+    }
 
     var coordinate: CLLocationCoordinate2D {
         CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+}
+
+/// Reads the saved list tolerantly: a field added by a newer version is simply
+/// missing in older saved files and gets its default, so an update never loses what
+/// was saved (the room above all).
+extension SharedItem {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID(),
+            name: try c.decodeIfPresent(String.self, forKey: .name) ?? "",
+            latitude: try c.decode(Double.self, forKey: .latitude),
+            longitude: try c.decode(Double.self, forKey: .longitude),
+            category: try c.decodeIfPresent(String.self, forKey: .category) ?? "",
+            note: try c.decodeIfPresent(String.self, forKey: .note) ?? "",
+            deleted: try c.decodeIfPresent(Bool.self, forKey: .deleted) ?? false,
+            version: try c.decodeIfPresent(Int.self, forKey: .version) ?? 0,
+            syncedVersion: try c.decodeIfPresent(Int.self, forKey: .syncedVersion) ?? 0,
+            createdAt: try c.decodeIfPresent(Date.self, forKey: .createdAt),
+            countryCode: try c.decodeIfPresent(String.self, forKey: .countryCode),
+            timeZoneID: try c.decodeIfPresent(String.self, forKey: .timeZoneID),
+            createdBy: try c.decodeIfPresent(String.self, forKey: .createdBy) ?? "",
+            deletedAt: try c.decodeIfPresent(Date.self, forKey: .deletedAt),
+            purge: try c.decodeIfPresent(Bool.self, forKey: .purge) ?? false,
+            kind: try c.decodeIfPresent(String.self, forKey: .kind) ?? "place",
+            route: try? c.decodeIfPresent(SharedRoutePayload.self, forKey: .route)
+        )
     }
 }
 
@@ -65,12 +136,45 @@ private struct RemoteSharedItem: Decodable {
     let created_at: String?
     let created_by: String?
     let deleted_at: String?
+    let kind: String?
+    let payload: SharedRoutePayload?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, lat, lng, category, note, deleted, updated_at
+        case created_at, created_by, deleted_at, kind, payload
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        lat = try c.decode(Double.self, forKey: .lat)
+        lng = try c.decode(Double.self, forKey: .lng)
+        category = try c.decodeIfPresent(String.self, forKey: .category) ?? ""
+        note = try c.decodeIfPresent(String.self, forKey: .note) ?? ""
+        deleted = try c.decodeIfPresent(Bool.self, forKey: .deleted) ?? false
+        updated_at = try c.decode(String.self, forKey: .updated_at)
+        created_at = try c.decodeIfPresent(String.self, forKey: .created_at)
+        created_by = try c.decodeIfPresent(String.self, forKey: .created_by)
+        deleted_at = try c.decodeIfPresent(String.self, forKey: .deleted_at)
+        kind = try c.decodeIfPresent(String.self, forKey: .kind)
+        // A route that cannot be read must not stop the rest of the room from loading.
+        payload = try? c.decodeIfPresent(SharedRoutePayload.self, forKey: .payload)
+    }
 }
 
 private struct SharedSnapshot: Codable {
     var room: String?
     var items: [SharedItem]
     var cursor: String?
+    var memberID: UUID?
+    var emoji: String?
+}
+
+/// Just the room itself: used when the saved list cannot be read in full, so the
+/// room is kept and the entries are fetched again from the server.
+private struct SharedSnapshotLight: Decodable {
+    var room: String?
     var memberID: UUID?
     var emoji: String?
 }
@@ -136,6 +240,10 @@ final class SharedListStore: ObservableObject {
     @Published var pendingJoinCode: String?
     /// This person's emoji in the room (nil until the server has given one).
     @Published private(set) var myEmoji: String?
+    /// 3 or more once the database has the route columns (0 while unknown).
+    @Published private(set) var serverVersion = 0
+
+    var routesSupported: Bool { serverVersion >= 3 }
 
     /// Days an entry stays in the trash.
     static let trashDays = 30
@@ -158,13 +266,18 @@ final class SharedListStore: ObservableObject {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         fileURL = directory.appendingPathComponent("shared.json")
 
-        if let raw = try? Data(contentsOf: fileURL),
-           let snapshot = try? JSONDecoder().decode(SharedSnapshot.self, from: raw) {
-            room = snapshot.room
-            items = snapshot.items
-            cursor = snapshot.cursor
-            memberID = snapshot.memberID
-            myEmoji = snapshot.emoji
+        if let raw = try? Data(contentsOf: fileURL) {
+            if let snapshot = try? JSONDecoder().decode(SharedSnapshot.self, from: raw) {
+                room = snapshot.room
+                items = snapshot.items
+                cursor = snapshot.cursor
+                memberID = snapshot.memberID
+                myEmoji = snapshot.emoji
+            } else if let light = try? JSONDecoder().decode(SharedSnapshotLight.self, from: raw) {
+                room = light.room
+                memberID = light.memberID
+                myEmoji = light.emoji
+            }
         }
     }
 
@@ -305,6 +418,33 @@ final class SharedListStore: ObservableObject {
         changed()
     }
 
+    /// Shares a route. Very long routes are thinned out to keep the entry small.
+    func addRoute(name: String, route: RouteFavorite, category: String, note: String) {
+        guard let first = route.stops.first else { return }
+        var shared = route
+        if shared.stops.count > 400 {
+            let step = Int(ceil(Double(shared.stops.count) / 400))
+            var thinned = stride(from: 0, to: shared.stops.count, by: step).map { shared.stops[$0] }
+            if let last = shared.stops.last {
+                thinned.append(last)
+            }
+            shared.stops = thinned
+        }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        items.append(SharedItem(
+            name: trimmed.isEmpty ? route.name : trimmed,
+            latitude: first.latitude,
+            longitude: first.longitude,
+            category: category.trimmingCharacters(in: .whitespacesAndNewlines),
+            note: note.trimmingCharacters(in: .whitespacesAndNewlines),
+            createdAt: Date(),
+            createdBy: myEmoji ?? "",
+            kind: "route",
+            route: SharedRoutePayload(shared)
+        ))
+        changed()
+    }
+
     func updateItem(_ id: UUID, name: String, coordinate: CLLocationCoordinate2D, category: String, note: String) {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -438,6 +578,11 @@ final class SharedListStore: ObservableObject {
     /// just gets the same emoji back). An older database without the member functions
     /// is simply skipped.
     private func ensureMember(room currentRoom: String) async {
+        if serverVersion < 3,
+           let data = try? await Self.rpc("ikiwi_version", [:]),
+           let version = try? JSONDecoder().decode(Int.self, from: data) {
+            serverVersion = version
+        }
         if memberID == nil {
             memberID = UUID()
         }
@@ -469,7 +614,7 @@ final class SharedListStore: ObservableObject {
             start += 200
 
             let payload: [[String: Any]] = chunk.map { item in
-                [
+                var entry: [String: Any] = [
                     "id": item.id.uuidString.lowercased(),
                     "name": item.name,
                     "lat": item.latitude,
@@ -478,8 +623,15 @@ final class SharedListStore: ObservableObject {
                     "note": item.note,
                     "deleted": item.deleted,
                     "created_by": item.createdBy,
-                    "purge": item.purge
+                    "purge": item.purge,
+                    "kind": item.kind
                 ]
+                if item.kind == "route", let route = item.route,
+                   let encoded = try? JSONEncoder().encode(route),
+                   let object = try? JSONSerialization.jsonObject(with: encoded) {
+                    entry["payload"] = object
+                }
+                return entry
             }
             _ = try await Self.rpc("ikiwi_push", ["p_room": currentRoom, "p_items": payload])
 
@@ -520,6 +672,10 @@ final class SharedListStore: ObservableObject {
                 if let by = entry.created_by, !by.isEmpty {
                     items[index].createdBy = by
                 }
+                if let kind = entry.kind {
+                    items[index].kind = kind
+                    items[index].route = kind == "route" ? (entry.payload ?? items[index].route) : nil
+                }
                 items[index].deletedAt = entry.deleted ? SharedDateText.parseServerDate(entry.deleted_at) ?? items[index].deletedAt : nil
                 items[index].name = entry.name
                 items[index].latitude = entry.lat
@@ -540,7 +696,9 @@ final class SharedListStore: ObservableObject {
                     syncedVersion: 0,
                     createdAt: SharedDateText.parseServerDate(entry.created_at),
                     createdBy: entry.created_by ?? "",
-                    deletedAt: entry.deleted ? SharedDateText.parseServerDate(entry.deleted_at) : nil
+                    deletedAt: entry.deleted ? SharedDateText.parseServerDate(entry.deleted_at) : nil,
+                    kind: entry.kind ?? "place",
+                    route: entry.kind == "route" ? entry.payload : nil
                 ))
             }
         }
@@ -685,6 +843,7 @@ struct SharedListSheet: View {
     let currentPin: CLLocationCoordinate2D?
     let onPick: (SharedItem) -> Void
     let onTeleport: (SharedItem) -> Void
+    let onRoute: (RouteFavorite) -> Void
 
     @State private var joinText = ""
     @State private var editorTarget: SharedEditorTarget?
@@ -966,13 +1125,28 @@ struct SharedListSheet: View {
         return "，\(item.createdBy)新增 \(time)"
     }
 
+    private func routeFavorite(_ item: SharedItem) -> RouteFavorite? {
+        item.route?.favorite(named: item.name)
+    }
+
+    private func detailLine(_ item: SharedItem) -> String {
+        if item.isRoute, let favorite = routeFavorite(item) {
+            return favorite.subtitleText + Self.addedSuffix(for: item)
+        }
+        return String(format: "%.5f, %.5f", item.latitude, item.longitude) + Self.addedSuffix(for: item)
+    }
+
     private func row(_ item: SharedItem) -> some View {
         Button {
-            onTeleport(item)
+            if item.isRoute, let favorite = routeFavorite(item) {
+                onRoute(favorite)
+            } else {
+                onTeleport(item)
+            }
             dismiss()
         } label: {
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.name)
+                Text(item.isRoute ? "路線 · \(item.name)" : item.name)
                     .foregroundStyle(.primary)
                 TimelineView(.everyMinute) { context in
                     Text(TimeZoneFormat.describe(
@@ -983,8 +1157,7 @@ struct SharedListSheet: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
-                Text(String(format: "%.5f, %.5f", item.latitude, item.longitude)
-                     + Self.addedSuffix(for: item))
+                Text(detailLine(item))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                 if !item.note.isEmpty {
@@ -996,13 +1169,22 @@ struct SharedListSheet: View {
             }
         }
         .swipeActions(edge: .leading) {
-            Button {
-                onPick(item)
-                dismiss()
-            } label: {
-                Label("放置圖釘", systemImage: "mappin")
+            if item.isRoute {
+                Button {
+                    saveRouteToFavorites(item)
+                } label: {
+                    Label("收藏", systemImage: "star")
+                }
+                .tint(.orange)
+            } else {
+                Button {
+                    onPick(item)
+                    dismiss()
+                } label: {
+                    Label("放置圖釘", systemImage: "mappin")
+                }
+                .tint(.blue)
             }
-            .tint(.blue)
         }
         .swipeActions(edge: .trailing) {
             Button(role: .destructive) {
@@ -1018,23 +1200,39 @@ struct SharedListSheet: View {
             .tint(.orange)
         }
         .contextMenu {
-            Button {
-                onPick(item)
-                dismiss()
-            } label: {
-                Label("只放置圖釘（不瞬移）", systemImage: "mappin")
-            }
-            Button {
-                CoordinateClipboard.copy(CoordinateClipboard.text(for: item.coordinate))
-            } label: {
-                Label("複製座標", systemImage: "doc.on.doc")
-            }
-            Button {
-                FavoritesStore.shared.addCoordinate(name: item.name, coordinate: item.coordinate, categoryID: nil)
-                Task { await FavoritesStore.shared.fillMissingPlaceInfo() }
-                infoMessage = "已加入我的收藏。"
-            } label: {
-                Label("加入我的收藏", systemImage: "star")
+            if item.isRoute, let favorite = routeFavorite(item) {
+                Button {
+                    let points = favorite.stops.map {
+                        CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
+                    }
+                    CoordinateClipboard.copy(CoordinateClipboard.text(for: points))
+                } label: {
+                    Label("複製座標清單", systemImage: "doc.on.doc")
+                }
+                Button {
+                    saveRouteToFavorites(item)
+                } label: {
+                    Label("加入我的收藏", systemImage: "star")
+                }
+            } else {
+                Button {
+                    onPick(item)
+                    dismiss()
+                } label: {
+                    Label("只放置圖釘（不瞬移）", systemImage: "mappin")
+                }
+                Button {
+                    CoordinateClipboard.copy(CoordinateClipboard.text(for: item.coordinate))
+                } label: {
+                    Label("複製座標", systemImage: "doc.on.doc")
+                }
+                Button {
+                    FavoritesStore.shared.addCoordinate(name: item.name, coordinate: item.coordinate, categoryID: nil)
+                    Task { await FavoritesStore.shared.fillMissingPlaceInfo() }
+                    infoMessage = "已加入我的收藏。"
+                } label: {
+                    Label("加入我的收藏", systemImage: "star")
+                }
             }
             Button {
                 editorTarget = SharedEditorTarget(item: item)
@@ -1047,6 +1245,14 @@ struct SharedListSheet: View {
                 Label("移到垃圾桶", systemImage: "trash")
             }
         }
+    }
+
+    private func saveRouteToFavorites(_ item: SharedItem) {
+        guard var favorite = routeFavorite(item) else { return }
+        favorite.id = UUID()
+        FavoritesStore.shared.addRoute(favorite)
+        Task { await FavoritesStore.shared.fillMissingPlaceInfo() }
+        infoMessage = "已把這條路線加入我的收藏。"
     }
 
     private func runConnectionTest() {
@@ -1103,8 +1309,10 @@ struct SharedTrashView: View {
 
     private func row(_ item: SharedItem) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(item.name)
-            Text(String(format: "%.5f, %.5f", item.latitude, item.longitude))
+            Text(item.isRoute ? "路線 · \(item.name)" : item.name)
+            Text(item.isRoute
+                 ? (item.route?.favorite(named: item.name).subtitleText ?? "路線")
+                 : String(format: "%.5f, %.5f", item.latitude, item.longitude))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
             Text(detail(item))
@@ -1149,8 +1357,10 @@ struct SharedItemEditor: View {
     @State private var note = ""
     @State private var didLoad = false
 
+    private var isRoute: Bool { item?.isRoute == true }
+
     private var parsedCoordinate: CLLocationCoordinate2D? {
-        SharedCoordinateText.parse(coordinateText)
+        isRoute ? item?.coordinate : SharedCoordinateText.parse(coordinateText)
     }
 
     var body: some View {
@@ -1160,20 +1370,22 @@ struct SharedItemEditor: View {
                     TextField("例如：公園入口", text: $name)
                 }
 
-                Section {
-                    TextField("緯度,經度", text: $coordinateText)
-                        .keyboardType(.numbersAndPunctuation)
-                        .autocorrectionDisabled()
-                    Button("貼上剪貼簿的座標") {
-                        coordinateText = UIPasteboard.general.string ?? ""
-                    }
-                } header: {
-                    Text("座標")
-                } footer: {
-                    if parsedCoordinate == nil && !coordinateText.isEmpty {
-                        Text("格式不正確，請輸入像 25.033000,121.565400 這樣的緯度與經度。")
-                    } else {
-                        Text("例如 25.033000,121.565400。新增時預設為地圖上目前的圖釘。")
+                if !isRoute {
+                    Section {
+                        TextField("緯度,經度", text: $coordinateText)
+                            .keyboardType(.numbersAndPunctuation)
+                            .autocorrectionDisabled()
+                        Button("貼上剪貼簿的座標") {
+                            coordinateText = UIPasteboard.general.string ?? ""
+                        }
+                    } header: {
+                        Text("座標")
+                    } footer: {
+                        if parsedCoordinate == nil && !coordinateText.isEmpty {
+                            Text("格式不正確，請輸入像 25.033000,121.565400 這樣的緯度與經度。")
+                        } else {
+                            Text("例如 25.033000,121.565400。新增時預設為地圖上目前的圖釘。")
+                        }
                     }
                 }
 
@@ -1259,5 +1471,78 @@ struct SharedSaveSheet: View {
                 store.addItem(name: name, coordinate: point, category: category, note: note)
             }
         }
+    }
+}
+
+
+/// "Share this route": name, category and note, then it goes into the shared list.
+struct SharedRouteSaveSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var store = SharedListStore.shared
+
+    let route: RouteFavorite
+
+    @State private var name = ""
+    @State private var category = ""
+    @State private var note = ""
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if store.room == nil {
+                    notice("還沒有共享房間", "請先到左上角的「共享清單」建立或加入房間。")
+                } else if !store.routesSupported {
+                    notice("伺服器還沒有升級", "請先在 Supabase 執行新的 SQL（docs/shared-list.sql），再回來分享路線。")
+                } else {
+                    Form {
+                        Section("路線") {
+                            Text(route.subtitleText)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                        Section("名稱") {
+                            TextField("例如：河濱步道", text: $name)
+                        }
+                        Section("分類") {
+                            TextField("選填", text: $category)
+                            if !store.categories.isEmpty {
+                                Menu("選擇現有分類") {
+                                    ForEach(store.categories, id: \.self) { existing in
+                                        Button(existing) { category = existing }
+                                    }
+                                }
+                            }
+                        }
+                        Section("備註") {
+                            TextField("選填", text: $note, axis: .vertical)
+                                .lineLimit(1...4)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("分享路線")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("取消") { dismiss() }
+                }
+                if store.room != nil && store.routesSupported {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("分享") {
+                            store.addRoute(name: name, route: route, category: category, note: note)
+                            dismiss()
+                        }
+                    }
+                }
+            }
+            .onAppear {
+                if name.isEmpty { name = route.name }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func notice(_ title: String, _ message: String) -> some View {
+        ContentUnavailableView(title, systemImage: "person.2.slash", description: Text(message))
     }
 }

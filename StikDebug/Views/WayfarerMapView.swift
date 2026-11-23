@@ -171,6 +171,7 @@ struct WayfarerMapView: UIViewRepresentable {
     var markers: [WayfarerMapMarker]
     var onTap: (CLLocationCoordinate2D) -> Void
     var onLongPressMarker: (String) -> Void
+    var onUserLocation: (CLLocationCoordinate2D) -> Void
     var onCameraChange: (WayfarerCamera) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -409,6 +410,14 @@ struct WayfarerMapView: UIViewRepresentable {
         }
 
         // MARK: MKMapViewDelegate
+
+        func mapView(_ mapView: MKMapView, didUpdate userLocation: MKUserLocation) {
+            guard let location = userLocation.location else { return }
+            let coordinate = location.coordinate
+            DispatchQueue.main.async { [weak self] in
+                self?.parent.onUserLocation(coordinate)
+            }
+        }
 
         func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
             let camera = mapView.camera

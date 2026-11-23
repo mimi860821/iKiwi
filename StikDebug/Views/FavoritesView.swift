@@ -535,7 +535,8 @@ struct FavoritesSheet: View {
 
     @AppStorage("wayfarer.favSort") private var sortRaw = FavoriteSort.addedNewest.rawValue
     @State private var section = 0
-    @State private var filter: FavoriteFilter = .all
+    /// The category that was open last time, so the list opens where it was left.
+    @AppStorage("wayfarer.favFilter") private var filterRaw = "all"
     @State private var showCategoryManager = false
     @State private var showRename = false
     @State private var showImporter = false
@@ -551,6 +552,24 @@ struct FavoritesSheet: View {
     let onPickCoordinate: (CoordinateFavorite) -> Void
     let onTeleportCoordinate: (CoordinateFavorite) -> Void
     let onPickRoute: (RouteFavorite) -> Void
+
+    private var filter: FavoriteFilter {
+        get {
+            if filterRaw == "uncategorized" { return .uncategorized }
+            if let id = UUID(uuidString: filterRaw),
+               store.data.categories.contains(where: { $0.id == id }) {
+                return .category(id)
+            }
+            return .all
+        }
+        nonmutating set {
+            switch newValue {
+            case .all: filterRaw = "all"
+            case .uncategorized: filterRaw = "uncategorized"
+            case .category(let id): filterRaw = id.uuidString
+            }
+        }
+    }
 
     private var filteredCoordinates: [CoordinateFavorite] {
         switch filter {

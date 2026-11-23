@@ -18,6 +18,8 @@ create table if not exists public.ikiwi_items (
   created_at timestamptz not null default now(),
   deleted_at timestamptz,
   created_by text not null default '',
+  kind text not null default 'place',
+  payload jsonb,
   primary key (room, id)
 );
 
@@ -29,6 +31,9 @@ alter table public.ikiwi_items alter column created_at set not null;
 alter table public.ikiwi_items add column if not exists deleted_at timestamptz;
 alter table public.ikiwi_items add column if not exists created_by text not null default '';
 update public.ikiwi_items set deleted_at = updated_at where deleted and deleted_at is null;
+-- A route is an entry with kind 'route'; its stops and settings are kept in payload.
+alter table public.ikiwi_items add column if not exists kind text not null default 'place';
+alter table public.ikiwi_items add column if not exists payload jsonb;
 
 create index if not exists ikiwi_items_room_updated
   on public.ikiwi_items (room, updated_at);
@@ -103,8 +108,13 @@ begin
 
     v_deleted := coalesce((it->>'deleted')::boolean, false);
 
+    if it->'payload' is not null and length((it->'payload')::text) > 100000 then
+      raise exception 'payload too large';
+    end if;
+
     insert into public.ikiwi_items
-      (room, id, name, lat, lng, category, note, deleted, updated_at, deleted_at, created_by)
+      (room, id, name, lat, lng, category, note, deleted, updated_at, deleted_at,
+       created_by, kind, payload)
     values (
       p_room, (it->>'id')::uuid,
       left(coalesce(it->>'name', ''), 200),
@@ -113,7 +123,9 @@ begin
       left(coalesce(it->>'note', ''), 1000),
       v_deleted, t,
       case when v_deleted then t end,
-      left(coalesce(it->>'created_by', ''), 16)
+      left(coalesce(it->>'created_by', ''), 16),
+      case when it->>'kind' = 'route' then 'route' else 'place' end,
+      case when jsonb_typeof(it->'payload') = 'object' then it->'payload' end
     )
     on conflict (room, id) do update set
       name = excluded.name, lat = excluded.lat, lng = excluded.lng,
@@ -124,6 +136,11 @@ begin
       created_by = case when public.ikiwi_items.created_by = ''
                         then excluded.created_by
                         else public.ikiwi_items.created_by end,
+      -- An older app does not send kind/payload: keep what the entry already has.
+      kind = case when it->>'kind' is not null then excluded.kind
+                  else public.ikiwi_items.kind end,
+      payload = case when it->'payload' is not null then excluded.payload
+                     else public.ikiwi_items.payload end,
       updated_at = t;
   end loop;
 
@@ -196,6 +213,11 @@ begin
   delete from public.ikiwi_members where room = p_room and member_id = p_member;
 end $$;
 
+-- The app asks which version of this script the database has.
+create or replace function public.ikiwi_version()
+returns integer
+language sql immutable as $$ select 3 $$;
+
 revoke all on function public.ikiwi_pull(text, timestamptz, uuid) from public;
 revoke all on function public.ikiwi_push(text, jsonb) from public;
 revoke all on function public.ikiwi_join(text, uuid, text) from public;
@@ -204,5 +226,6 @@ grant execute on function public.ikiwi_pull(text, timestamptz, uuid) to anon;
 grant execute on function public.ikiwi_push(text, jsonb) to anon;
 grant execute on function public.ikiwi_join(text, uuid, text) to anon;
 grant execute on function public.ikiwi_leave(text, uuid) to anon;
+grant execute on function public.ikiwi_version() to anon;
 
 notify pgrst, 'reload schema';
