@@ -995,7 +995,7 @@ struct LocationSimulationView: View {
     }
 
     var body: some View {
-        changeHandlers(mapContent)
+        settingChangeHandlers(routeChangeHandlers(changeHandlers(mapContent)))
     }
 
     /// The connection banner. Swipe it up to shrink it to one line, tap that line (or
@@ -1396,6 +1396,10 @@ struct LocationSimulationView: View {
         .onChange(of: speedKmh) { _, _ in
             applySpeedChange()
         }
+    }
+
+    private func routeChangeHandlers<Content: View>(_ content: Content) -> some View {
+        content
         .onChange(of: updateInterval) { _, _ in
             intervalChanged()
         }
@@ -1425,6 +1429,10 @@ struct LocationSimulationView: View {
                 playbackRunningSince = Date()
             }
         }
+    }
+
+    private func settingChangeHandlers<Content: View>(_ content: Content) -> some View {
+        content
         .onChange(of: pathShapeRaw) { _, _ in
             replanIfPaused()
         }
