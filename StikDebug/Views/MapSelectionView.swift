@@ -1028,11 +1028,20 @@ struct LocationSimulationView: View {
                 }
             )
         } else {
-            DeviceConnectionStatusView(errorMessage: connectionErrorMessage)
-                .padding(12)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                .padding(.horizontal)
-                .gesture(
+            VStack(spacing: 5) {
+                DeviceConnectionStatusView(errorMessage: connectionErrorMessage)
+                    .padding(12)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                // The little bar says the banner can be swiped up to shrink it.
+                if !isDeviceConnected {
+                    Capsule()
+                        .fill(Color.white.opacity(0.9))
+                        .frame(width: 40, height: 5)
+                        .shadow(color: .black.opacity(0.25), radius: 1.5, y: 0.5)
+                }
+            }
+            .padding(.horizontal)
+            .gesture(
                     DragGesture(minimumDistance: 12).onEnded { value in
                         if value.translation.height < -20, !isDeviceConnected {
                             withAnimation(.easeInOut(duration: 0.2)) { statusCollapsed = true }
@@ -1899,6 +1908,7 @@ struct LocationSimulationView: View {
             withAnimation(.easeInOut(duration: 0.35)) {
                 position = .user
             }
+            showCopied("已恢復，等待手機重新定位", duration: 3.5)
         }
     }
 
@@ -2423,9 +2433,9 @@ extension LocationSimulationView {
         .accessibilityLabel("回到手機的真實位置，停止模擬")
     }
 
-    private func showCopied(_ message: String) {
+    private func showCopied(_ message: String, duration: Double = 1.6) {
         withAnimation { copyToastText = message }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
             if copyToastText == message {
                 withAnimation { copyToastText = nil }
             }

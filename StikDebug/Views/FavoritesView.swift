@@ -815,7 +815,7 @@ struct FavoritesSheet: View {
 
                 HintFooter(text: selecting
                            ? "點一下勾選項目，再按下方「移動到分類」。"
-                           : "點一下直接瞬移；向右滑只放置圖釘，向左滑刪除；長按可重新命名或移動分類。")
+                           : "點一下直接瞬移；向右滑只放置圖釘，向左滑可改名或刪除；長按可移動分類。")
             }
         }
     }
@@ -943,6 +943,15 @@ struct FavoritesSheet: View {
             } label: {
                 Label("刪除", systemImage: "trash")
             }
+            Button {
+                renamingRouteID = nil
+                renamingCoordinateID = favorite.id
+                renameText = favorite.name
+                showRename = true
+            } label: {
+                Label("改名", systemImage: "pencil")
+            }
+            .tint(.orange)
         }
         .contextMenu {
             Button {
@@ -1038,6 +1047,15 @@ struct FavoritesSheet: View {
                             } label: {
                                 Label("刪除", systemImage: "trash")
                             }
+                            Button {
+                                renamingCoordinateID = nil
+                                renamingRouteID = route.id
+                                renameText = route.name
+                                showRename = true
+                            } label: {
+                                Label("改名", systemImage: "pencil")
+                            }
+                            .tint(.orange)
                         }
                         .contextMenu {
                             Button {
@@ -1067,7 +1085,7 @@ struct FavoritesSheet: View {
                 }
                 .listStyle(.plain)
 
-                HintFooter(text: "點一下載入並建立路線；向左滑刪除；長按可重新命名。")
+                HintFooter(text: "點一下載入並建立路線；向左滑可改名或刪除。")
             }
         }
     }
