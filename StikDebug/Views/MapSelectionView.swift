@@ -1028,18 +1028,17 @@ struct LocationSimulationView: View {
                 }
             )
         } else {
-            VStack(spacing: 5) {
+            VStack(spacing: 6) {
                 DeviceConnectionStatusView(errorMessage: connectionErrorMessage)
-                    .padding(12)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-                // The little bar says the banner can be swiped up to shrink it.
+                // The little bar, inside the box, says it can be swiped up to shrink it.
                 if !isDeviceConnected {
                     Capsule()
-                        .fill(Color.white.opacity(0.9))
+                        .fill(Color.secondary.opacity(0.5))
                         .frame(width: 40, height: 5)
-                        .shadow(color: .black.opacity(0.25), radius: 1.5, y: 0.5)
                 }
             }
+            .padding(12)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             .padding(.horizontal)
             .gesture(
                     DragGesture(minimumDistance: 12).onEnded { value in
