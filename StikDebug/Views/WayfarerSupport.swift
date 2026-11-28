@@ -66,6 +66,7 @@ enum WayfarerTab: String, CaseIterable, Identifiable {
 /// out than the one before, so the circles of `radius` around the walker on two
 /// neighbouring laps just touch and never overlap.
 enum SpiralPath {
+    static let maxLaps = 30
     static let radiusRange: ClosedRange<Double> = 50...5000
 
     /// Distance between one lap and the next.

@@ -852,7 +852,8 @@ struct LocationSimulationView: View {
     @AppStorage("wayfarer.spiralRadius") private var spiralRadius: Double = 400
     @AppStorage("wayfarer.spiralLaps") private var spiralLaps: Int = 10
     @AppStorage("wayfarer.spiralClockwise") private var spiralClockwise = true
-    @AppStorage("wayfarer.spiralInfinite") private var spiralInfinite = false
+    /// Laps are limited to `SpiralPath.maxLaps`; the "go on until stopped" mode is off.
+    private let spiralInfinite = false
     /// The spiral being walked: it is extended a few laps at a time as the walk goes on.
     @State private var spiralRun: SpiralRun?
     /// Which time round it is when a route repeats.
@@ -2324,7 +2325,15 @@ extension LocationSimulationView {
     }
 
     private var spiralLapsClamped: Int {
-        max(spiralLaps, 1)
+        min(max(spiralLaps, 1), SpiralPath.maxLaps)
+    }
+
+    /// Typing or stepping can never go past the limit.
+    private var spiralLapsBinding: Binding<Int> {
+        Binding(
+            get: { spiralLapsClamped },
+            set: { spiralLaps = min(max($0, 1), SpiralPath.maxLaps) }
+        )
     }
 
     private func refreshSpiralPreview() {
@@ -2390,25 +2399,20 @@ extension LocationSimulationView {
                     .labelsHidden()
             }
 
-            Toggle("無限圈（一直往外走，直到按停止）", isOn: $spiralInfinite)
-                .font(.subheadline)
-
-            if !spiralInfinite {
-                HStack(spacing: 8) {
-                    Text("圈數")
-                        .font(.subheadline)
-                    TextField("圈", value: $spiralLaps, format: .number)
-                        .keyboardType(.numberPad)
-                        .multilineTextAlignment(.trailing)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 90)
-                    Text("圈")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                    Stepper("", value: $spiralLaps, in: 1...100_000)
-                        .labelsHidden()
-                }
+            HStack(spacing: 8) {
+                Text("圈數")
+                    .font(.subheadline)
+                TextField("圈", value: spiralLapsBinding, format: .number)
+                    .keyboardType(.numberPad)
+                    .multilineTextAlignment(.trailing)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 90)
+                Text("圈（最多 \(SpiralPath.maxLaps)）")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Stepper("", value: spiralLapsBinding, in: 1...SpiralPath.maxLaps)
+                    .labelsHidden()
             }
 
             HStack(spacing: 8) {
