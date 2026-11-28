@@ -24,6 +24,18 @@ private struct CoordinateSnapshot: Equatable {
     }
 }
 
+/// A spiral under way. `totalLaps` nil means it goes on until it is stopped.
+private struct SpiralRun {
+    static let chunkLaps = 4
+
+    let center: CLLocationCoordinate2D
+    let radius: Double
+    let clockwise: Bool
+    let totalLaps: Int?
+    /// How far (radians) the points have been made so far.
+    var generatedTheta: Double
+}
+
 /// What the spiral outline depends on; when it changes the outline is redrawn.
 private struct SpiralPreviewKey: Equatable {
     var latitude: Double?
@@ -31,6 +43,7 @@ private struct SpiralPreviewKey: Equatable {
     var radius: Double
     var laps: Int
     var clockwise: Bool
+    var infinite: Bool
     var active: Bool
 }
 
@@ -839,6 +852,11 @@ struct LocationSimulationView: View {
     @AppStorage("wayfarer.spiralRadius") private var spiralRadius: Double = 400
     @AppStorage("wayfarer.spiralLaps") private var spiralLaps: Int = 10
     @AppStorage("wayfarer.spiralClockwise") private var spiralClockwise = true
+    @AppStorage("wayfarer.spiralInfinite") private var spiralInfinite = false
+    /// The spiral being walked: it is extended a few laps at a time as the walk goes on.
+    @State private var spiralRun: SpiralRun?
+    /// Which time round it is when a route repeats.
+    @State private var repeatCycle = 1
     /// Outline of the spiral shown on the map while it is being set up.
     @State private var spiralPreview: [CLLocationCoordinate2D] = []
     /// The centre of the spiral that was built, so Reset can bring it back.
@@ -933,6 +951,14 @@ struct LocationSimulationView: View {
 
     private var routeSummaryText: String? {
         guard let routePlan else { return nil }
+        if routeIsSpiral, let run = spiralRun {
+            guard let laps = run.totalLaps else { return "一直往外繞，直到按停止" }
+            let length = SpiralPath.length(radius: run.radius, laps: laps)
+            let seconds = length / WayfarerSpeed.metersPerSecond(fromKmh: speedKmh)
+            let duration = Self.routeDurationFormatter.string(from: seconds) ?? ""
+            return String(format: "%d 圈 • 全程約 %.0f 公里", laps, length / 1000)
+                + (duration.isEmpty ? "" : " • 約 \(duration)")
+        }
         let distanceText = Measurement(
             value: routePlan.distance / 1000,
             unit: UnitLength.kilometers
@@ -1438,6 +1464,7 @@ struct LocationSimulationView: View {
                 panelCollapsed = false
                 playbackElapsedBase = 0
                 playbackRunningSince = nil
+                repeatCycle = 1
             }
         }
         .onChange(of: canCollapsePanel) { _, canCollapse in
@@ -1636,6 +1663,7 @@ struct LocationSimulationView: View {
         let distance = distanceAlong(displayCoordinates)
         let fallbackSpeed = WayfarerSpeed.metersPerSecond(fromKmh: speedKmh)
         repeatPlayback = false
+        spiralRun = nil
         routeSourceStops = coordinates
         routeSourceFollowRoads = false
         routeSourceShape = .oneWay
@@ -2012,6 +2040,7 @@ struct LocationSimulationView: View {
         multiStops = []
         routeSourceStops = []
         routeStopBackup = nil
+        spiralRun = nil
         autoStartAfterBuild = false
         routeIsHop = false
         routeFromMultiStop = false
@@ -2112,6 +2141,7 @@ struct LocationSimulationView: View {
 
     private func startRoutePlayback(routeID: UUID) {
         isPlaybackPaused = false
+        repeatCycle = 1
         playbackElapsedBase = 0
         playbackRunningSince = Date()
         playbackCursor = 1
@@ -2146,6 +2176,9 @@ struct LocationSimulationView: View {
                 let cursor = playbackCursor
 
                 if cursor >= samples.count {
+                    // A spiral grows as it is walked: add the next laps and go on.
+                    let extended = await MainActor.run { extendSpiralIfNeeded() }
+                    if extended { continue }
                     if repeatPlayback, samples.count > 1 {
                         if routeCycleDirty {
                             await rebuildCycleForRepeat()
@@ -2156,6 +2189,7 @@ struct LocationSimulationView: View {
                                 playbackGeneration += 1
                             }
                         }
+                        await MainActor.run { repeatCycle += 1 }
                         try? await Task.sleep(for: .milliseconds(500))
                         continue
                     }
@@ -2290,7 +2324,7 @@ extension LocationSimulationView {
     }
 
     private var spiralLapsClamped: Int {
-        min(max(spiralLaps, 1), SpiralPath.maxLaps)
+        max(spiralLaps, 1)
     }
 
     private func refreshSpiralPreview() {
@@ -2298,24 +2332,31 @@ extension LocationSimulationView {
             if !spiralPreview.isEmpty { spiralPreview = [] }
             return
         }
+        // Only the first laps are drawn; the rest would be too much to show.
         spiralPreview = SpiralPath.previewCoordinates(
             center: center,
             radius: spiralRadiusClamped,
-            laps: spiralLapsClamped,
+            laps: spiralInfinite ? 12 : min(spiralLapsClamped, 12),
             clockwise: spiralClockwise
         )
     }
 
-    /// "相鄰兩圈間距 800 公尺 …" with the size of the whole walk.
+    /// "每圈間距 800 公尺 …" with the size of the whole walk.
     private var spiralSummary: String {
         let radius = spiralRadiusClamped
+        let spacing = String(
+            format: "每圈間距 %.0f 公尺：相鄰兩圈 %.0f 公尺的範圍剛好相切、不重疊。",
+            SpiralPath.pitch(radius: radius), radius
+        )
+        if spiralInfinite {
+            return spacing + "會一直往外繞，直到你按停止（地圖上只預覽前 12 圈）。"
+        }
         let laps = spiralLapsClamped
         let length = SpiralPath.length(radius: radius, laps: laps)
         let seconds = length / WayfarerSpeed.metersPerSecond(fromKmh: speedKmh)
         let duration = Self.routeDurationFormatter.string(from: seconds) ?? ""
-        return String(
-            format: "每圈間距 %.0f 公尺：相鄰兩圈 %.0f 公尺的範圍剛好相切、不重疊。最外圈半徑約 %.1f 公里，全程約 %.0f 公里",
-            SpiralPath.pitch(radius: radius), radius,
+        return spacing + String(
+            format: "最外圈半徑約 %.1f 公里，全程約 %.0f 公里",
             SpiralPath.outerRadius(radius: radius, laps: laps) / 1000,
             length / 1000
         ) + (duration.isEmpty ? "。" : "、約 \(duration)。")
@@ -2349,13 +2390,25 @@ extension LocationSimulationView {
                     .labelsHidden()
             }
 
-            HStack(spacing: 8) {
-                Text("圈數")
-                    .font(.subheadline)
-                Spacer(minLength: 0)
-                Stepper("\(spiralLapsClamped) 圈", value: $spiralLaps, in: 1...SpiralPath.maxLaps)
-                    .font(.subheadline)
-                    .fixedSize()
+            Toggle("無限圈（一直往外走，直到按停止）", isOn: $spiralInfinite)
+                .font(.subheadline)
+
+            if !spiralInfinite {
+                HStack(spacing: 8) {
+                    Text("圈數")
+                        .font(.subheadline)
+                    TextField("圈", value: $spiralLaps, format: .number)
+                        .keyboardType(.numberPad)
+                        .multilineTextAlignment(.trailing)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                    Text("圈")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Stepper("", value: $spiralLaps, in: 1...100_000)
+                        .labelsHidden()
+                }
             }
 
             HStack(spacing: 8) {
@@ -2418,12 +2471,17 @@ extension LocationSimulationView {
     private func buildSpiralRoute() {
         guard let center = coordinate, !isRouteRunning else { return }
         let speedMps = WayfarerSpeed.metersPerSecond(fromKmh: speedKmh)
-        let coordinates = SpiralPath.coordinates(
+        let totalLaps: Int? = spiralInfinite ? nil : spiralLapsClamped
+        let thetaMax = totalLaps.map { 2 * Double.pi * Double($0) }
+        // The first few laps now; more are added as the walk reaches the end.
+        let firstTheta = min(2 * Double.pi * Double(SpiralRun.chunkLaps), thetaMax ?? .infinity)
+        let coordinates = [center] + SpiralPath.coordinates(
             center: center,
             radius: spiralRadiusClamped,
-            laps: spiralLapsClamped,
             clockwise: spiralClockwise,
-            step: WayfarerSpeed.pathSpacing(forSpeed: speedMps)
+            step: WayfarerSpeed.pathSpacing(forSpeed: speedMps),
+            fromTheta: 0,
+            toTheta: firstTheta
         )
         guard coordinates.count > 1, let last = coordinates.last else { return }
 
@@ -2439,6 +2497,14 @@ extension LocationSimulationView {
         isPrefetchingRouteSpeeds = false
 
         spiralCenter = center
+        spiralRun = SpiralRun(
+            center: center,
+            radius: spiralRadiusClamped,
+            clockwise: spiralClockwise,
+            totalLaps: totalLaps,
+            generatedTheta: firstTheta
+        )
+        repeatCycle = 1
         coordinate = nil
         multiStops = []
 
@@ -2470,6 +2536,75 @@ extension LocationSimulationView {
         if let routePolyline {
             position = .rect(routePolyline.boundingMapRect)
         }
+    }
+
+    private var routeIsSpiral: Bool {
+        spiralRun != nil && !routeFromMultiStop && !routeIsHop
+    }
+
+    /// "第 3 圈" / "第 3／10 圈": worked out from how far the walker is from the centre.
+    private var spiralLapText: String? {
+        guard routeIsSpiral, let run = spiralRun,
+              let current = routePlaybackCoordinate ?? simulationSession.coordinate else {
+            return nil
+        }
+        let distance = WayfarerRouteBuilder.straightDistance(run.center, current)
+        let lap = Int(distance / SpiralPath.pitch(radius: run.radius)) + 1
+        if let total = run.totalLaps {
+            return "第 \(min(lap, total))／\(total) 圈"
+        }
+        return "第 \(lap) 圈"
+    }
+
+    /// Adds the next laps to the walk when it has reached the end of what was made.
+    /// Returns false when the spiral is complete (or this is not a spiral).
+    private func extendSpiralIfNeeded() -> Bool {
+        guard routeIsSpiral, var run = spiralRun, let plan = routePlan,
+              let last = plan.displayCoordinates.last else {
+            return false
+        }
+        let thetaMax = run.totalLaps.map { 2 * Double.pi * Double($0) }
+        if let thetaMax, run.generatedTheta >= thetaMax { return false }
+
+        let target = min(
+            run.generatedTheta + 2 * Double.pi * Double(SpiralRun.chunkLaps),
+            thetaMax ?? .infinity
+        )
+        let speedMps = WayfarerSpeed.metersPerSecond(fromKmh: speedKmh)
+        let chunk = SpiralPath.coordinates(
+            center: run.center,
+            radius: run.radius,
+            clockwise: run.clockwise,
+            step: WayfarerSpeed.pathSpacing(forSpeed: speedMps),
+            fromTheta: run.generatedTheta,
+            toTheta: target
+        )
+        guard !chunk.isEmpty else { return false }
+
+        let oldCount = plan.displayCoordinates.count
+        let fresh = buildPlaybackSamples(
+            from: [last] + chunk,
+            speedWays: [],
+            fallbackSpeedMetersPerSecond: speedMps
+        )
+        // Keep the indices consistent with the longer route.
+        let offset = oldCount - 1 - playbackBaseOffset
+        routePlaybackSamples += fresh.dropFirst().map {
+            RoutePlaybackSample(
+                coordinate: $0.coordinate,
+                delayFromPrevious: $0.delayFromPrevious,
+                baseIndex: $0.baseIndex + offset
+            )
+        }
+        let added = distanceAlong([last] + chunk)
+        setRoutePlan(RouteSimulationPlan(
+            displayCoordinates: plan.displayCoordinates + chunk,
+            distance: plan.distance + added,
+            expectedTravelTime: plan.expectedTravelTime + added / speedMps
+        ))
+        run.generatedTheta = target
+        spiralRun = run
+        return true
     }
 
     private var pathShape: RouteShape {
@@ -2686,6 +2821,7 @@ extension LocationSimulationView {
             radius: spiralRadius,
             laps: spiralLaps,
             clockwise: spiralClockwise,
+            infinite: spiralInfinite,
             active: panelTab == .spiral && !hasRouteContext
         )
     }
@@ -2768,6 +2904,7 @@ extension LocationSimulationView {
 
     private func buildHopRoute(startingAt startIndex: Int = 0, autoStart: Bool = false) {
         guard multiStops.count >= 2 else { return }
+        spiralRun = nil
         let allStops = multiStops.map(\.coordinate)
         let shape = pathShape
         let stops = Self.arrangedStops(allStops, startingAt: startIndex, shape: shape)
@@ -2884,9 +3021,14 @@ extension LocationSimulationView {
 
     /// "已到 2／5 站" for multi-stop routes.
     private var routeProgressText: String? {
+        if routeIsSpiral {
+            return spiralLapText
+        }
         guard routeFromMultiStop, !routeLogical.sequence.isEmpty else { return nil }
         let total = routeLogical.sequence.count
-        return "已到 \(min(passedWaypointCount(), total))／\(total) 站"
+        let stops = "已到 \(min(passedWaypointCount(), total))／\(total) 站"
+        // A repeating route also says which time round it is.
+        return repeatPlayback ? "第 \(repeatCycle) 回 · \(stops)" : stops
     }
 
     /// "已到 2／5 站 · 已進行 12:34"
@@ -3426,6 +3568,7 @@ extension LocationSimulationView {
             buildHopRoute(startingAt: startIndex, autoStart: autoStart)
             return
         }
+        spiralRun = nil
         let allStops = multiStops.map(\.coordinate)
         let arranged = Self.arrangedStops(allStops, startingAt: startIndex, shape: pathShape)
         guard arranged.count >= 2 else {

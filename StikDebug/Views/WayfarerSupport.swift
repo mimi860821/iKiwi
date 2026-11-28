@@ -66,7 +66,6 @@ enum WayfarerTab: String, CaseIterable, Identifiable {
 /// out than the one before, so the circles of `radius` around the walker on two
 /// neighbouring laps just touch and never overlap.
 enum SpiralPath {
-    static let maxLaps = 30
     static let radiusRange: ClosedRange<Double> = 50...5000
 
     /// Distance between one lap and the next.
@@ -106,23 +105,24 @@ enum SpiralPath {
         return CLLocationCoordinate2D(latitude: lat2 * 180 / .pi, longitude: longitude)
     }
 
-    /// The walk itself: points about `step` metres apart (further apart far from the
-    /// centre, where the curve is gentle), starting at the centre.
+    /// A stretch of the walk: points about `step` metres apart (further apart far from
+    /// the centre, where the curve is gentle) after `fromTheta` up to `toTheta`
+    /// (radians turned from the start; one lap is 2π). The start itself is not included.
     static func coordinates(
         center: CLLocationCoordinate2D,
         radius: Double,
-        laps: Int,
         clockwise: Bool,
-        step: Double
+        step: Double,
+        fromTheta: Double,
+        toTheta: Double
     ) -> [CLLocationCoordinate2D] {
         let b = pitch(radius: radius) / (2 * .pi)
-        let thetaMax = 2 * .pi * Double(laps)
-        var theta = 0.0
-        var result = [center]
-        while theta < thetaMax {
+        var theta = fromTheta
+        var result: [CLLocationCoordinate2D] = []
+        while theta < toTheta {
             let r = b * theta
             let chord = max(step, min(r * 0.02, 100))
-            theta = min(theta + chord / (r * r + b * b).squareRoot(), thetaMax)
+            theta = min(theta + chord / (r * r + b * b).squareRoot(), toTheta)
             result.append(destination(
                 from: center,
                 bearing: clockwise ? theta : -theta,
