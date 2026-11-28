@@ -49,6 +49,7 @@ enum TravelMode: String, CaseIterable, Identifiable {
 enum WayfarerTab: String, CaseIterable, Identifiable {
     case teleport
     case multi
+    case spiral
 
     var id: String { rawValue }
 
@@ -56,6 +57,98 @@ enum WayfarerTab: String, CaseIterable, Identifiable {
         switch self {
         case .teleport: return "瞬移"
         case .multi: return "多點路徑"
+        case .spiral: return "繞圈"
+        }
+    }
+}
+
+/// A spiral walked outwards from a centre point. Each lap lies `2 × radius` further
+/// out than the one before, so the circles of `radius` around the walker on two
+/// neighbouring laps just touch and never overlap.
+enum SpiralPath {
+    static let maxLaps = 30
+    static let radiusRange: ClosedRange<Double> = 50...5000
+
+    /// Distance between one lap and the next.
+    static func pitch(radius: Double) -> Double {
+        radius * 2
+    }
+
+    /// Radius of the outermost lap.
+    static func outerRadius(radius: Double, laps: Int) -> Double {
+        pitch(radius: radius) * Double(laps)
+    }
+
+    /// Length of the whole walk, in metres.
+    static func length(radius: Double, laps: Int) -> Double {
+        let b = pitch(radius: radius) / (2 * .pi)
+        let t = 2 * .pi * Double(laps)
+        return b / 2 * (t * (1 + t * t).squareRoot() + asinh(t))
+    }
+
+    /// The point `distance` metres from `center` on the given bearing (radians from north).
+    private static func destination(
+        from center: CLLocationCoordinate2D,
+        bearing: Double,
+        distance: Double
+    ) -> CLLocationCoordinate2D {
+        let earthRadius = 6_371_000.0
+        let delta = distance / earthRadius
+        let lat1 = center.latitude * .pi / 180
+        let lon1 = center.longitude * .pi / 180
+        let lat2 = asin(sin(lat1) * cos(delta) + cos(lat1) * sin(delta) * cos(bearing))
+        let lon2 = lon1 + atan2(
+            sin(bearing) * sin(delta) * cos(lat1),
+            cos(delta) - sin(lat1) * sin(lat2)
+        )
+        var longitude = lon2 * 180 / .pi
+        longitude = (longitude + 540).truncatingRemainder(dividingBy: 360) - 180
+        return CLLocationCoordinate2D(latitude: lat2 * 180 / .pi, longitude: longitude)
+    }
+
+    /// The walk itself: points about `step` metres apart (further apart far from the
+    /// centre, where the curve is gentle), starting at the centre.
+    static func coordinates(
+        center: CLLocationCoordinate2D,
+        radius: Double,
+        laps: Int,
+        clockwise: Bool,
+        step: Double
+    ) -> [CLLocationCoordinate2D] {
+        let b = pitch(radius: radius) / (2 * .pi)
+        let thetaMax = 2 * .pi * Double(laps)
+        var theta = 0.0
+        var result = [center]
+        while theta < thetaMax {
+            let r = b * theta
+            let chord = max(step, min(r * 0.02, 100))
+            theta = min(theta + chord / (r * r + b * b).squareRoot(), thetaMax)
+            result.append(destination(
+                from: center,
+                bearing: clockwise ? theta : -theta,
+                distance: b * theta
+            ))
+        }
+        return result
+    }
+
+    /// A light outline for the map while the settings are being chosen.
+    static func previewCoordinates(
+        center: CLLocationCoordinate2D,
+        radius: Double,
+        laps: Int,
+        clockwise: Bool
+    ) -> [CLLocationCoordinate2D] {
+        let b = pitch(radius: radius) / (2 * .pi)
+        let thetaMax = 2 * .pi * Double(laps)
+        let count = 72 * laps
+        return (0...count).map { index in
+            let theta = thetaMax * Double(index) / Double(count)
+            return destination(
+                from: center,
+                bearing: clockwise ? theta : -theta,
+                distance: b * theta
+            )
         }
     }
 }

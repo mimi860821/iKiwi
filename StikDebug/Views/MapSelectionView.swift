@@ -24,6 +24,16 @@ private struct CoordinateSnapshot: Equatable {
     }
 }
 
+/// What the spiral outline depends on; when it changes the outline is redrawn.
+private struct SpiralPreviewKey: Equatable {
+    var latitude: Double?
+    var longitude: Double?
+    var radius: Double
+    var laps: Int
+    var clockwise: Bool
+    var active: Bool
+}
+
 private struct RouteSearchSelection {
     let title: String
     let coordinate: CLLocationCoordinate2D
@@ -826,6 +836,13 @@ struct LocationSimulationView: View {
     @State private var showHistory = false
     @State private var showSharedList = false
     @State private var panelCollapsed = false
+    @AppStorage("wayfarer.spiralRadius") private var spiralRadius: Double = 400
+    @AppStorage("wayfarer.spiralLaps") private var spiralLaps: Int = 10
+    @AppStorage("wayfarer.spiralClockwise") private var spiralClockwise = true
+    /// Outline of the spiral shown on the map while it is being set up.
+    @State private var spiralPreview: [CLLocationCoordinate2D] = []
+    /// The centre of the spiral that was built, so Reset can bring it back.
+    @State private var spiralCenter: CLLocationCoordinate2D?
     /// The top connection banner shrunk to one line (swipe it up).
     @State private var statusCollapsed = false
     /// The phone's own location as the system reports it (the simulated one while simulating).
@@ -1056,7 +1073,7 @@ struct LocationSimulationView: View {
                 source: mapSource,
                 position: position,
                 routeLine: hasRouteContext ? routePolyline : nil,
-                stopLine: (multiStops.count >= 2 && !hasRouteContext) ? multiStops.map { $0.coordinate } : [],
+                stopLine: mapStopLine,
                 markers: mapMarkers,
                 onTap: { tapped in
                     if isMultiStopMode {
@@ -1143,6 +1160,8 @@ struct LocationSimulationView: View {
                                 pinControls
                             case .multi:
                                 multiStopControls
+                            case .spiral:
+                                spiralControls
                             }
                         }
                     }
@@ -1441,6 +1460,9 @@ struct LocationSimulationView: View {
 
     private func settingChangeHandlers<Content: View>(_ content: Content) -> some View {
         content
+        .onChange(of: spiralPreviewKey) { _, _ in
+            refreshSpiralPreview()
+        }
         .onChange(of: pathShapeRaw) { _, _ in
             replanIfPaused()
         }
@@ -1960,6 +1982,9 @@ struct LocationSimulationView: View {
     private func resetKeepingStops() {
         guard routeFromMultiStop, routeSourceStops.count >= 2 else {
             resetRouteSelection()
+            if panelTab == .spiral, let center = spiralCenter {
+                coordinate = center
+            }
             return
         }
         let stops = routeStopBackup ?? routeSourceStops
@@ -2258,6 +2283,195 @@ extension LocationSimulationView {
         panelTab == .multi && !hasRouteContext
     }
 
+    // MARK: Spiral
+
+    private var spiralRadiusClamped: Double {
+        min(max(spiralRadius, SpiralPath.radiusRange.lowerBound), SpiralPath.radiusRange.upperBound)
+    }
+
+    private var spiralLapsClamped: Int {
+        min(max(spiralLaps, 1), SpiralPath.maxLaps)
+    }
+
+    private func refreshSpiralPreview() {
+        guard panelTab == .spiral, !hasRouteContext, let center = coordinate else {
+            if !spiralPreview.isEmpty { spiralPreview = [] }
+            return
+        }
+        spiralPreview = SpiralPath.previewCoordinates(
+            center: center,
+            radius: spiralRadiusClamped,
+            laps: spiralLapsClamped,
+            clockwise: spiralClockwise
+        )
+    }
+
+    /// "相鄰兩圈間距 800 公尺 …" with the size of the whole walk.
+    private var spiralSummary: String {
+        let radius = spiralRadiusClamped
+        let laps = spiralLapsClamped
+        let length = SpiralPath.length(radius: radius, laps: laps)
+        let seconds = length / WayfarerSpeed.metersPerSecond(fromKmh: speedKmh)
+        let duration = Self.routeDurationFormatter.string(from: seconds) ?? ""
+        return String(
+            format: "每圈間距 %.0f 公尺：相鄰兩圈 %.0f 公尺的範圍剛好相切、不重疊。最外圈半徑約 %.1f 公里，全程約 %.0f 公里",
+            SpiralPath.pitch(radius: radius), radius,
+            SpiralPath.outerRadius(radius: radius, laps: laps) / 1000,
+            length / 1000
+        ) + (duration.isEmpty ? "。" : "、約 \(duration)。")
+    }
+
+    private var spiralControls: some View {
+        VStack(spacing: 8) {
+            if let center = coordinate {
+                Text(String(format: "圓心：%.5f, %.5f", center.latitude, center.longitude))
+                    .font(.footnote.monospaced())
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("點選地圖、搜尋，或按「\(Image(systemName: "keyboard"))」設定圓心")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                Text("半徑")
+                    .font(.subheadline)
+                TextField("公尺", value: $spiralRadius, format: .number.precision(.fractionLength(0...0)))
+                    .keyboardType(.decimalPad)
+                    .multilineTextAlignment(.trailing)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 90)
+                Text("公尺")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Stepper("", value: $spiralRadius, in: SpiralPath.radiusRange, step: 50)
+                    .labelsHidden()
+            }
+
+            HStack(spacing: 8) {
+                Text("圈數")
+                    .font(.subheadline)
+                Spacer(minLength: 0)
+                Stepper("\(spiralLapsClamped) 圈", value: $spiralLaps, in: 1...SpiralPath.maxLaps)
+                    .font(.subheadline)
+                    .fixedSize()
+            }
+
+            HStack(spacing: 8) {
+                Text("方向")
+                    .font(.subheadline)
+                Picker("方向", selection: $spiralClockwise) {
+                    Text("順時針").tag(true)
+                    Text("逆時針").tag(false)
+                }
+                .pickerStyle(.segmented)
+            }
+
+            Text(spiralSummary)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            TravelModeSpeedBar(
+                modeRaw: $travelModeRaw,
+                speedKmh: $speedKmh,
+                updateInterval: $updateInterval,
+                modeLocked: false
+            )
+
+            HStack(spacing: 8) {
+                Button("停止", action: clear)
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                    .disabled(!pairingExists || isBusy || !hasActiveSimulation)
+
+                Button {
+                    if let current = currentPosition {
+                        applySelection(current)
+                    }
+                } label: {
+                    Image(systemName: "location.fill")
+                }
+                .buttonStyle(.bordered)
+                .disabled(currentPosition == nil)
+                .accessibilityLabel("把目前位置當圓心")
+
+                Button {
+                    showCoordinateInput = true
+                } label: {
+                    Image(systemName: "keyboard")
+                }
+                .buttonStyle(.bordered)
+                .accessibilityLabel("輸入座標")
+
+                Button("建立路線", action: buildSpiralRoute)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(coordinate == nil)
+            }
+        }
+    }
+
+    /// Builds the spiral as a route (like an imported track): it is then played with
+    /// the normal "play route" controls.
+    private func buildSpiralRoute() {
+        guard let center = coordinate, !isRouteRunning else { return }
+        let speedMps = WayfarerSpeed.metersPerSecond(fromKmh: speedKmh)
+        let coordinates = SpiralPath.coordinates(
+            center: center,
+            radius: spiralRadiusClamped,
+            laps: spiralLapsClamped,
+            clockwise: spiralClockwise,
+            step: WayfarerSpeed.pathSpacing(forSpeed: speedMps)
+        )
+        guard coordinates.count > 1, let last = coordinates.last else { return }
+
+        routeLoadTask?.cancel()
+        routeLoadTask = nil
+        routeSpeedPrefetchTask?.cancel()
+        routeSpeedPrefetchTask = nil
+        routeRequestID = UUID()
+        setRoutePlan(nil)
+        routePlaybackSamples = []
+        routePlaybackCoordinate = nil
+        isLoadingRoute = false
+        isPrefetchingRouteSpeeds = false
+
+        spiralCenter = center
+        coordinate = nil
+        multiStops = []
+
+        let distance = distanceAlong(coordinates)
+        repeatPlayback = false
+        // No stop list: a spiral is not saved, shared or copied as stops.
+        routeSourceStops = []
+        routeStopBackup = nil
+        routeSourceFollowRoads = false
+        routeSourceShape = .oneWay
+        routeIsHop = false
+        routeFromMultiStop = false
+        routeCycleDirty = false
+        routeLogical = .empty
+        routeWaypointIndices = []
+        playbackBaseOffset = 0
+        routeStartSelection = RouteSearchSelection(title: "圓心", coordinate: center)
+        routeEndSelection = RouteSearchSelection(title: "最外圈終點", coordinate: last)
+        setRoutePlan(RouteSimulationPlan(
+            displayCoordinates: coordinates,
+            distance: distance,
+            expectedTravelTime: distance / speedMps
+        ))
+        routePlaybackSamples = buildPlaybackSamples(
+            from: coordinates,
+            speedWays: [],
+            fallbackSpeedMetersPerSecond: speedMps
+        )
+        if let routePolyline {
+            position = .rect(routePolyline.boundingMapRect)
+        }
+    }
+
     private var pathShape: RouteShape {
         RouteShape(rawValue: pathShapeRaw) ?? .oneWay
     }
@@ -2457,6 +2671,25 @@ extension LocationSimulationView {
         showCopied("已複製 \(routeSourceStops.count) 個座標")
     }
 
+    /// The dashed line drawn while a route is being set up: the stops so far, or the
+    /// outline of the spiral.
+    private var mapStopLine: [CLLocationCoordinate2D] {
+        if hasRouteContext { return [] }
+        if panelTab == .spiral { return spiralPreview }
+        return multiStops.count >= 2 ? multiStops.map { $0.coordinate } : []
+    }
+
+    private var spiralPreviewKey: SpiralPreviewKey {
+        SpiralPreviewKey(
+            latitude: coordinate?.latitude,
+            longitude: coordinate?.longitude,
+            radius: spiralRadius,
+            laps: spiralLaps,
+            clockwise: spiralClockwise,
+            active: panelTab == .spiral && !hasRouteContext
+        )
+    }
+
     private var mapSource: MapSource {
         MapSource(rawValue: mapSourceRaw) ?? .appleStandard
     }
@@ -2474,7 +2707,12 @@ extension LocationSimulationView {
                 result.append(WayfarerMapMarker(id: "current", coordinate: displayedRouteCoordinate, label: "目前位置", kind: .current))
             }
         } else if let coordinate {
-            result.append(WayfarerMapMarker(id: "pin", coordinate: coordinate, label: "圖釘", kind: .pin))
+            result.append(WayfarerMapMarker(
+                id: "pin",
+                coordinate: coordinate,
+                label: panelTab == .spiral ? "圓心" : "圖釘",
+                kind: .pin
+            ))
         }
         if multiStops.count <= 100 {
             for (index, stop) in multiStops.enumerated() {
@@ -3121,6 +3359,9 @@ extension LocationSimulationView {
             DispatchQueue.main.async { simulate() }
         case .multi:
             addStop(target)
+            centerMap(on: target)
+        case .spiral:
+            applySelection(target)
             centerMap(on: target)
         }
     }
